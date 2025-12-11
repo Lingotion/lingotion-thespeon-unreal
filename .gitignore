@@ -1,0 +1,31 @@
+# Unreal plugin basics
+Binaries/
+Build/**/Binaries/
+Intermediate/
+DerivedDataCache/
+Saved/
+.vscode/
+.idea/
+*.suo
+*.user
+*.userprefs
+*.opensdf
+*.sdf
+*.VC.db
+*.VC.opendb
+
+# If your plugin has sample projects inside a Samples/ dir:
+Samples/**/Binaries/
+Samples/**/DerivedDataCache/
+Samples/**/Intermediate/
+Samples/**/Saved/
+
+# Keep these tracked:
+!Source/
+!Config/
+!Resources/
+!Content/
+!*.uplugin
+
+# Ignore data from imported packs
+RuntimeData/

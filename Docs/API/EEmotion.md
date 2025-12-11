@@ -1,0 +1,36 @@
+# Enum `EEmotion`
+
+### `None`
+### `Ecstasy`
+### `Admiration`
+### `Terror`
+### `Amazement`
+### `Grief`
+### `Loathing`
+### `Rage`
+### `Vigilance`
+### `Joy`
+### `Trust`
+### `Fear`
+### `Surprise`
+### `Sadness`
+### `Disgust`
+### `Anger`
+### `Anticipation`
+### `Serenity`
+### `Acceptance`
+### `Apprehension`
+### `Distraction`
+### `Pensiveness`
+### `Boredom`
+### `Annoyance`
+### `Interest`
+### `Emotionless`
+### `Contempt`
+### `Remorse`
+### `Disapproval`
+### `Awe`
+### `Submission`
+### `Love`
+### `Optimism`
+### `Aggressiveness`

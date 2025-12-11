@@ -1,0 +1,33 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0",
+	"FriendlyName": "Lingotion Thespeon",
+	"Description": "Lingotion Thespeon is an on-device AI engine designed to generate real-time character acting and voiceovers.\nThe package runs entirely offline on the player's device, eliminating cloud costs and network dependencies.\n\nSee https://github.com/Lingotion/lingotion-thespeon-unreal/blob/main/README.md to get started.",
+	"Category": "Other",
+	"CreatedBy": "Lingotion",
+	"CreatedByURL": "https://lingotion.com/",
+	"DocsURL": "https://github.com/Lingotion/lingotion-thespeon-unreal/blob/main/README.md",
+	"MarketplaceURL": "",
+	"SupportURL": "https://discord.gg/9f2HFyu5gF",
+	"CanContainContent": true,
+	"IsBetaVersion": true,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "LingotionThespeonEditor",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "LingotionThespeon",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	],
+  	"Plugins": [
+  	  { "Name": "NNERuntimeORT",  "Enabled": true },
+  	  { "Name": "PythonScriptPlugin",  "Enabled": true },
+	]
+}
