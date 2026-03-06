@@ -62,6 +62,7 @@ public class LingotionThespeonEditor : ModuleRules
 				"AssetTools",
 				"ApplicationCore",
 				"HTTP",
+				"EditorScriptingUtilities"
 				
 				// ... add private dependencies that you statically link with here ...	
 			}

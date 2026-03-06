@@ -13,6 +13,7 @@ Saved/
 *.sdf
 *.VC.db
 *.VC.opendb
+Content/ # Remove this if we want to ship content
 
 # If your plugin has sample projects inside a Samples/ dir:
 Samples/**/Binaries/
@@ -24,8 +25,32 @@ Samples/**/Saved/
 !Source/
 !Config/
 !Resources/
-!Content/
+#!Content/           # only if your plugin actually ships content
 !*.uplugin
 
-# Ignore data from imported packs
+# Ignore data from imported files
 RuntimeData/
+
+# Protobuf
+Source/ThirdParty/Protobuf/protobuf/.git/
+Source/ThirdParty/Protobuf/protobuf/benchmarks/
+Source/ThirdParty/Protobuf/protobuf/conformance/
+Source/ThirdParty/Protobuf/protobuf/examples/
+Source/ThirdParty/Protobuf/protobuf/cmake/
+Source/ThirdParty/Protobuf/protobuf/csharp/
+Source/ThirdParty/Protobuf/protobuf/java/
+Source/ThirdParty/Protobuf/protobuf/python/
+Source/ThirdParty/Protobuf/protobuf/ruby/
+Source/ThirdParty/Protobuf/protobuf/php/
+Source/ThirdParty/Protobuf/protobuf/objectivec/
+Source/ThirdParty/Protobuf/protobuf/kokoro/
+Source/ThirdParty/Protobuf/protobuf/.github/
+Source/ThirdParty/Protobuf/protobuf/build/
+Source/ThirdParty/Protobuf/protobuf/*.sh
+Source/ThirdParty/Protobuf/protobuf/*.bat
+Source/ThirdParty/Protobuf/protobuf/CMakeLists.txt
+Source/ThirdParty/Protobuf/protobuf/Makefile*
+Source/ThirdParty/Protobuf/protobuf/*.bzl
+Source/ThirdParty/Protobuf/protobuf/BUILD*
+
+Makefile.local

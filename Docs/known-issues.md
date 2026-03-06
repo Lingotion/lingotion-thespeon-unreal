@@ -1,8 +1,9 @@
 # Known Issues and Limitations  
 **These issues are known and are currently being addressed by the Lingotion development team. If you find any other issues, please create a new issue through the [GitHub repository](https://github.com/Lingotion/lingotion-thespeon-unreal/issues/new).**
-* IPA support is not implemented yet.
-* Only a single input segment is supported as of now.
-* Multiple parallel inferences are not supported yet and will result in a crash.
-* The first synthesis has higher latency and performance impact than subsequent synthetizations due to buffer initializations. It is advised to utilize `TryPreloadCharacter` to load the models into memory before synthesis if possible.
+* Multiple parallel inferences and preloads are not supported yet. Instead subsequent requests are queued with syntheses being prioritized if called from the same ThespeonComponent. Attempting to run parallel operations by using several components simultaneously will result in a crash. 
+* The first synthesis has higher latency and performance impact than subsequent syntheses due to buffer initializations. It is advised to utilize `PreloadCharacter` to load the models into memory before synthesis if possible.
 * Very short syntheses - shorter than about 1/3 of a second - are not supported yet and will result in a crash.
-* Once selected, it is not possible to change the inference backend during runtime.
+* Support for the control character Audio Sample Request currently only extends to a maximum of one per word. Having several of these in a single word will cause all of them except the last to be ignored.
+* Number-to-words conversion only supports simple numeric formats: integers (e.g., "42"), decimals with a single decimal point (e.g., "3.14"), and ordinals (e.g., "1st", "2nd"). Locale-specific formats such as thousand separators ("1,000,000" or "1 000 000") and comma decimals ("3,14") are not supported. Negative numbers use "minus" (e.g., "-5" becomes "minus five"). The intended use of the built-in conversion is for simple string concatenation with numerical variables or ordinals, e.g., "I have {nbr} coins in my pocket." or "This is the {MakeOrdinal(MyInteger)} time that happened."
+* Any Audio Sample Request characters placed inside a numerical or ordinal value will be ignored. As a workaround you may write the numeral in letters and insert the Audio Sample Request character as you see fit.
+* Exiting Play mode during preload may sometimes result in a crash.

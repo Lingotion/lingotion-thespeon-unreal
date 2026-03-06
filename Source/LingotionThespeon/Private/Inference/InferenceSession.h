@@ -1,4 +1,4 @@
-// This code and software are protected by intellectual property law and is the property of Lingotion AB, reg. no. 558341-4138, Sweden. The code and software may only be used and distributed according to the Terms of Service and Use found at www.lingotion.com.
+// This code and software are protected by intellectual property law and is the property of Lingotion AB, reg. no. 559341-4138, Sweden. The code and software may only be used and distributed according to the Terms of Service and Use found at www.lingotion.com.
 
 #pragma once
 
@@ -9,51 +9,97 @@
 #include "Core/ModelInput.h"
 #include "Engine/InferenceConfig.h"
 #include "HAL/Runnable.h"
+#include "HAL/Event.h"
 #include "Core/ThespeonDataPacket.h"
-
 
 namespace Thespeon
 {
 
-	namespace Inference
-    {
-		// abstract class whose implementation handles a complete inference chain from input to output. 
-		// Runs several workloads according to the particular implementation's inference scheme.
-		class InferenceSession : public FRunnable
-		{
-		public:
-		    using TOnDataSynthesized = TDelegate<void(const Thespeon::Core::FAnyPacket&, float)>;
-		
-		    TOnDataSynthesized OnDataSynthesized;
+namespace Inference
+{
+/** Reason for session cancellation/stop */
+enum class ESessionStopReason : uint8
+{
+	None = 0,            // Not stopped
+	Completed,           // Normal completion
+	UserCancelled,       // User requested cancellation
+	ComponentDestroyed,  // Owning component is being destroyed
+	NewSessionRequested, // A new synthesis session was requested
+	Error                // Stopped due to an error
+};
 
-		    InferenceSession(const FLingotionModelInput& InInput, const FInferenceConfig InConfig, const FString& InSessionID)
-		        : InputConfig(InConfig), SessionID(InSessionID)
-		    {
-				// Copy all input data from struct
-				Input = InInput;
-			}
-		
-		    virtual ~InferenceSession()
-		    {
-		        Stop();
-		    }
+/** @brief Converts ESessionStopReason to a human-readable string. */
+const TCHAR* LexToString(ESessionStopReason Reason);
 
-		    virtual bool Init() override 
-			{ 
-				return true;
-			}
+/**
+ * Abstract base class for inference sessions that handle a complete inference chain from input to output.
+ * Runs several workloads according to the particular implementation's inference scheme.
+ */
+class InferenceSession : public FRunnable
+{
+  public:
+	InferenceSession(const FLingotionModelInput& InInput, FInferenceConfig InConfig, const FString& InSessionID);
 
-		    virtual uint32 Run() override = 0;
-		    virtual void Stop() override {}
-		    virtual void Exit() override {}
+	~InferenceSession() override;
 
-		
-		protected:
-			FLingotionModelInput Input;
-		    FInferenceConfig InputConfig;
-		    FString SessionID;
-		    SessionTensorPool TensorPool;
-		};
-
+	bool Init() override
+	{
+		return true;
 	}
-}
+
+	uint32 Run() override = 0;
+
+	/**
+	 * @brief Requests the session to stop execution.
+	 * Called when thread termination is requested (e.g., component destruction, new session).
+	 * Sets the stop flag.
+	 */
+	void Stop() override;
+
+	/**
+	 * @brief Called after Run() completes (whether normally or due to Stop).
+	 */
+	void Exit() override
+	{
+		// Base implementation - subclasses can override for additional cleanup
+	}
+
+	/**
+	 * @brief Requests the session to stop with a specific reason.
+	 * @param Reason The reason for stopping the session
+	 * @return true if stop was initiated by this call, false if already stopped
+	 */
+	bool StopWithReason(ESessionStopReason Reason);
+
+	/** @brief Returns true if stop has been requested. */
+	bool ShouldStop() const
+	{
+		return bStopRequested.Load();
+	}
+
+	/** @brief Returns the reason for stopping. */
+	ESessionStopReason GetStopReason() const
+	{
+		return StopReason;
+	}
+
+	/** Delegate for ThespeonComponent to bind to its packet handler function. */
+	DECLARE_DELEGATE_TwoParams(FOnDataSynthesized, const FString& /*SessionID*/, const Thespeon::Core::FThespeonDataPacket& /*DataPacket*/);
+	FOnDataSynthesized OnDataSynthesized;
+
+  protected:
+	FLingotionModelInput Input;
+	FInferenceConfig InputConfig;
+	FString SessionID;
+	SessionTensorPool TensorPool;
+
+	/** Thread-safe flag indicating stop has been requested */
+	TAtomic<bool> bStopRequested;
+	/** Reason for the stop request */
+	ESessionStopReason StopReason;
+	/** Shared token used to detect object lifetime in async lambdas */
+	TSharedRef<TAtomic<bool>> AliveToken = MakeShared<TAtomic<bool>>(true);
+};
+
+} // namespace Inference
+} // namespace Thespeon

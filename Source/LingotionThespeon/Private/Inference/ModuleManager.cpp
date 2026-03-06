@@ -1,116 +1,117 @@
-// This code and software are protected by intellectual property law and is the property of Lingotion AB, reg. no. 558341-4138, Sweden. The code and software may only be used and distributed according to the Terms of Service and Use found at www.lingotion.com.
+// This code and software are protected by intellectual property law and is the property of Lingotion AB, reg. no. 559341-4138, Sweden. The code and software may only be used and distributed according to the Terms of Service and Use found at www.lingotion.com.
 
 #include "ModuleManager.h"
 #include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
+#include "Utils/SubsystemUtils.h"
 
 void UModuleManager::Initialize(FSubsystemCollectionBase& Collection)
 {
-    Super::Initialize(Collection);
-    // your init...
+	Super::Initialize(Collection);
+	// your init...
 }
 
 void UModuleManager::Deinitialize()
 {
-    // your shutdown...
-    Super::Deinitialize();
+	// your shutdown...
+	Super::Deinitialize();
 }
 
-// We need to discuss how we want to do with these singletons. UGameInstanceSubsystem requires a context to be passed all the way down here.
-// This Getter is not safe as it just returns the first it finds. Having a cached instance is unncessary since getting it from GI is not expensive given a context.
 UModuleManager* UModuleManager::Get()
 {
-
-    // If we have a cached instance, make sure its GI still matches a live context
-    if (UModuleManager* S = CachedInstance.Get())
-    {
-        if (GEngine)
-        {
-            for (const FWorldContext& C : GEngine->GetWorldContexts())
-            {
-                if ((C.WorldType == EWorldType::Game || C.WorldType == EWorldType::PIE) && C.OwningGameInstance)
-                {
-                    if (S->GetGameInstance() == C.OwningGameInstance)
-                    {
-                        return S; // still valid for current GI
-                    }
-                }
-            }
-        }
-        // GI changed or went away → drop cache
-        CachedInstance = nullptr;
-    }
-
-    // Find a suitable GI and cache fresh
-    if (GEngine)
-    {
-        for (const FWorldContext& C : GEngine->GetWorldContexts())
-        {
-            if ((C.WorldType == EWorldType::Game || C.WorldType == EWorldType::PIE) && C.OwningGameInstance)
-            {
-                CachedInstance = C.OwningGameInstance->GetSubsystem<UModuleManager>();
-                if(!CachedInstance.IsValid())
-                {
-                    LINGO_LOG(EVerbosityLevel::Error, TEXT("ModuleManager subsystem not found in GameInstance."));
-                    return nullptr;
-                }
-                return CachedInstance.Get();
-            }
-        }
-    }
-
-    return nullptr;
+	return FLingotionThespeonSubsystemUtils::GetModuleManager();
 }
 
+/**
+ * @brief Deregisters a registered module if no workloads are loaded on any backend.
+ * @param ModuleID - The ID of the module to deregister.
+ * @return true if the module was successfully deregistered, false otherwise.
+ */
 bool UModuleManager::TryDeregisterModule(FString ModuleID)
 {
-    if(!IsRegistered(ModuleID))
-        return false;
-    Modules.Remove(ModuleID);
-    return true;
+	auto* ModulePtr = Modules.Find(ModuleID);
+	if (!ModulePtr)
+	{
+		return true; // not registered anyway
+	}
+	if (!ModulePtr->Get()->LoadedBackends.IsEmpty())
+	{
+		return false; // workloads still loaded, cannot deregister
+	}
+	Modules.Remove(ModuleID);
+	LINGO_LOG_FUNC(EVerbosityLevel::Info, TEXT("Deregistered module '%s'."), *ModuleID);
+	return true;
 }
 
 bool UModuleManager::IsRegistered(FString ModuleID)
 {
-    return Modules.Contains(ModuleID);
+	return Modules.Contains(ModuleID);
 }
 
-TSet<FString> UModuleManager::GetNonOverlappingModelMD5s(Thespeon::Core::Module* Module)
+// Determines which workload IDs can be safely removed when unloading a module.
+// Computes the set difference between this module's workload IDs and the IDs used by all
+// other loaded modules of the same type, ensuring shared models are not prematurely removed.
+TSet<FString> UModuleManager::GetWorkloadIDsToRemove(Thespeon::Core::Module* Module, EBackendType BackendType)
 {
-    TSet<FString> moduleMd5s = Module->GetAllFileMD5s();
-    TSet<FString> otherMd5s;
+	if (BackendType != EBackendType::None && !Module->LoadedBackends.Contains(BackendType))
+	{
+		LINGO_LOG_FUNC(
+		    EVerbosityLevel::Debug,
+		    TEXT("Module '%s' is not loaded on backend '%s'. Nothing to do."),
+		    *Module->ModuleID,
+		    *UEnum::GetValueAsString(BackendType)
+		);
+		return TSet<FString>();
+	}
+	TSet<FString> WorkloadIDs;
+	if (!Module->AddLoadedWorkloadIDs(BackendType, WorkloadIDs))
+	{
+		LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to get loaded workload IDs for module '%s'."), *Module->ModuleID);
+		return TSet<FString>();
+	}
+	TSet<FString> OtherWorkloadIDs;
 
-    for (const auto& loadedModule : Modules)
-    {
-        if(loadedModule.Value->ModuleID == Module->ModuleID || loadedModule.Value->GetModuleType() != Module->GetModuleType())
-            continue;
-     
-        otherMd5s.Append(loadedModule.Value->GetAllFileMD5s());
-        
-    }
-    
-    return moduleMd5s.Difference(otherMd5s);
+	for (const auto& LoadedModule : Modules)
+	{
+		// skip modules that are the same, of different type, or not loaded on the backend in question
+		if (LoadedModule.Value->ModuleID == Module->ModuleID || LoadedModule.Value->GetModuleType() != Module->GetModuleType() ||
+		    (BackendType != EBackendType::None && !LoadedModule.Value->LoadedBackends.Contains(BackendType)))
+		{
+			continue;
+		}
+		if (!LoadedModule.Value->AddLoadedWorkloadIDs(BackendType, OtherWorkloadIDs))
+		{
+			LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to get loaded workload IDs for module '%s'."), *LoadedModule.Value->ModuleID);
+			return TSet<FString>();
+		}
+	}
+
+	return WorkloadIDs.Difference(OtherWorkloadIDs);
 }
 
-TSet<FString> UModuleManager::GetNonOverlappingModelLangModules(Thespeon::ActorPack::ActorModule* Module)
+// Returns the set of language module IDs that are unique to the given character module
+// (not referenced by any other loaded character module). Used during unload to determine
+// which language modules can be safely removed alongside the character module.
+TSet<FString> UModuleManager::GetNonOverlappingModelLangModules(Thespeon::Character::CharacterModule* Module)
 {
-    TArray<FString> langModuleIDs;
-    Module->LanguageModuleIDs.GenerateValueArray(langModuleIDs);
+	TArray<FString> langModuleIDs;
+	Module->LanguageModuleIDs.GenerateValueArray(langModuleIDs);
 
-    TSet<FString> moduleMd5s(langModuleIDs);
-    TSet<FString> otherMd5s;
+	TSet<FString> moduleMd5s(langModuleIDs);
+	TSet<FString> otherMd5s;
 
-    for (const auto& loadedModule : Modules)
-    {
-        if(loadedModule.Value->ModuleID == Module->ModuleID || loadedModule.Value->GetModuleType() != Module->GetModuleType())
-            continue;
-     
-        TArray<FString> currentLangModuleIDs;
-        static_cast<Thespeon::ActorPack::ActorModule*>(loadedModule.Value.Get())->LanguageModuleIDs.GenerateValueArray(currentLangModuleIDs);
-        otherMd5s.Append(currentLangModuleIDs);
-        
-    }
-    
-    return moduleMd5s.Difference(otherMd5s);
+	for (const auto& LoadedModule : Modules)
+	{
+		if (LoadedModule.Value->ModuleID == Module->ModuleID || LoadedModule.Value->GetModuleType() != Module->GetModuleType())
+		{
+			continue;
+		}
+
+		TArray<FString> currentLangModuleIDs;
+		static_cast<Thespeon::Character::CharacterModule*>(LoadedModule.Value.Get())->LanguageModuleIDs.GenerateValueArray(currentLangModuleIDs);
+		otherMd5s.Append(currentLangModuleIDs);
+	}
+
+	return moduleMd5s.Difference(otherMd5s);
 }

@@ -1,4 +1,4 @@
-// This code and software are protected by intellectual property law and is the property of Lingotion AB, reg. no. 558341-4138, Sweden. The code and software may only be used and distributed according to the Terms of Service and Use found at www.lingotion.com.
+// This code and software are protected by intellectual property law and is the property of Lingotion AB, reg. no. 559341-4138, Sweden. The code and software may only be used and distributed according to the Terms of Service and Use found at www.lingotion.com.
 
 #pragma once
 
@@ -17,7 +17,7 @@ class SVerticalBox;
  */
 class FEditorInfoWindow : public TSharedFromThis<FEditorInfoWindow>
 {
-public:
+  public:
 	FEditorInfoWindow();
 	~FEditorInfoWindow();
 
@@ -27,8 +27,7 @@ public:
 	 * @param InModuleDeleter - Module deleter for handling deletion operations
 	 * @return The constructed tab widget
 	 */
-	TSharedRef<SDockTab> CreateTab(const FSpawnTabArgs& Args,
-	                                TSharedPtr<FEditorModuleDeleter> InModuleDeleter);
+	TSharedRef<SDockTab> CreateTab(const FSpawnTabArgs& Args);
 
 	/**
 	 * Refreshes the tab content, rebuilding the module list.
@@ -39,9 +38,12 @@ public:
 	 * Gets the current tab reference.
 	 * @return The current tab, or null if not created
 	 */
-	TSharedPtr<SDockTab> GetCurrentTab() const { return CurrentTab; }
+	TSharedPtr<SDockTab> GetCurrentTab() const
+	{
+		return CurrentTab;
+	}
 
-private:
+  private:
 	/**
 	 * Rebuilds the tab content with current module data.
 	 */
@@ -50,11 +52,11 @@ private:
 	/**
 	 * Selects a module for deletion.
 	 * @param ModuleID - The module ID
-	 * @param PackName - The pack name
+	 * @param Name - The name of the module
 	 * @param JsonPath - Path to the module JSON
-	 * @param bIsActorModule - Whether this is an actor module (vs language module)
+	 * @param bIsCharacterModule - Whether this is a character module (vs language module)
 	 */
-	void SelectModule(const FString& ModuleID, const FString& PackName, const FString& JsonPath, bool bIsActorModule);
+	void SelectModule(const FString& ModuleID, const FString& Name, const FString& JsonPath, bool bIsCharacterModule);
 
 	/**
 	 * Handles delete button click.
@@ -63,10 +65,10 @@ private:
 	FReply OnDeleteModuleClicked();
 
 	/**
-	 * Handles import pack button click.
+	 * Handles import file button click.
 	 * @return Reply indicating the event was handled
 	 */
-	FReply OnImportPackClicked();
+	FReply OnImportFileClicked();
 
 	/**
 	 * Gets the background color for a module based on selection state.
@@ -80,16 +82,23 @@ private:
 	 * @param MyGeometry - Geometry of the widget
 	 * @param MouseEvent - Mouse event data
 	 * @param ModuleID - Module ID
-	 * @param PackName - Pack name
+	 * @param Name - Module name
 	 * @param JsonPath - JSON path
 	 * @param InfoText - Information text (actor name or language name)
 	 * @param InfoText2 - Secondary information text (quality or empty)
-	 * @param bIsActorModule - Whether this is an actor module
+	 * @param bIsCharacterModule - Whether this is a character module
 	 * @return Reply indicating how the event was handled
 	 */
-	FReply OnModuleMouseButtonUp(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent,
-	                              FString ModuleID, FString PackName, FString JsonPath,
-	                              FString InfoText, FString InfoText2, bool bIsActorModule);
+	FReply OnModuleMouseButtonUp(
+	    const FGeometry& MyGeometry,
+	    const FPointerEvent& MouseEvent,
+	    FString ModuleID,
+	    FString Name,
+	    FString JsonPath,
+	    FString InfoText,
+	    FString InfoText2,
+	    bool bIsCharacterModule
+	);
 
 	/**
 	 * Validates the license key and updates UI visibility based on validation result.
@@ -123,7 +132,4 @@ private:
 	TSharedPtr<SVerticalBox> LicenseRoot;
 	TSharedPtr<SVerticalBox> FunctionalRoot;
 	bool bIsLicenseValid;
-
-	// Component dependencies
-	TSharedPtr<FEditorModuleDeleter> ModuleDeleter;
 };

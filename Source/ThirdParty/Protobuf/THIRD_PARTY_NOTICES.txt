@@ -1,0 +1,8 @@
+Protocol Buffers - Google's data interchange format
+Copyright 2008 Google Inc.
+https://github.com/protocolbuffers/protobuf
+
+Licensed under BSD 3-Clause License
+See LICENSE file for full text.
+
+Version: 3.21.12

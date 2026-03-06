@@ -1,4 +1,4 @@
-// This code and software are protected by intellectual property law and is the property of Lingotion AB, reg. no. 558341-4138, Sweden. The code and software may only be used and distributed according to the Terms of Service and Use found at www.lingotion.com.
+// This code and software are protected by intellectual property law and is the property of Lingotion AB, reg. no. 559341-4138, Sweden. The code and software may only be used and distributed according to the Terms of Service and Use found at www.lingotion.com.
 
 #pragma once
 
@@ -7,53 +7,71 @@
 #include "Containers/Set.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "Core/Module.h"
-#include "../ActorPack/ActorModule.h"
+#include "Character/CharacterModule.h"
 #include "Core/LingotionLogger.h"
+#include "Core/BackendType.h"
 #include "ModuleManager.generated.h"
 
-
-
-/// @brief Singleton which handles and creates all Modules. To be called by preload and unload. Used by WorkloadManager to figure out which workloads to deregister during unload.
+/**
+ * Game instance subsystem that owns and manages all loaded Module instances (character and language).
+ *
+ * Used during preload/unload to register, look up, and deregister modules.
+ * Also provides overlap detection so the WorkloadManager knows which workloads are safe to remove.
+ */
 UCLASS()
 class UModuleManager : public UGameInstanceSubsystem
 {
-    GENERATED_BODY()
-public:
-    virtual void Initialize(FSubsystemCollectionBase& Collection) override;
-    virtual void Deinitialize() override;
-    static UModuleManager* Get();
-    
-    template<typename T>
-    void RegisterModule(Thespeon::Core::FModuleEntry ModuleEntry)
-    {
-        static_assert(std::is_base_of_v<Thespeon::Core::Module, T>, "T must derive from Module");
-        if (!Modules.Contains(ModuleEntry.ModuleID))
-        {
-            LINGO_LOG(EVerbosityLevel::Debug, TEXT("ModuleManager::RegisterModule: Registering module '%s'."), *ModuleEntry.ModuleID);
-            Modules.Add(ModuleEntry.ModuleID, MakeUnique<T>(ModuleEntry)); // assumes T has ctor(TModuleEntry)
-        }
-    }
-    bool TryDeregisterModule(FString ModuleID); //deregisters all workloads in a module unless used by other module.
-    bool IsRegistered(FString ModuleID); //checks if present in map.
-    template<typename T>
-    T* GetModule(Thespeon::Core::FModuleEntry ModuleEntry, bool ShouldCreate = true)
-    {
-        static_assert(std::is_base_of_v<Thespeon::Core::Module, T>, "T must derive from Module");
-        
-        if(!Modules.Contains(ModuleEntry.ModuleID))
-        {
-            if(!ShouldCreate)
-                return nullptr;
-            LINGO_LOG(EVerbosityLevel::Debug, TEXT("ModuleManager::GetModule: Module '%s' not found. Creating "), *ModuleEntry.ModuleID);
-            RegisterModule<T>(ModuleEntry);
-        }
-        return static_cast<T*>(Modules[ModuleEntry.ModuleID].Get());
-    }
-    // Resource overlap detection - now uses safe dynamic_cast instead of enum + static_cast
-    TSet<FString> GetNonOverlappingModelMD5s(Thespeon::Core::Module* Module); // returns file md5s that are not in any other module (safe to remove)
-    TSet<FString> GetNonOverlappingModelLangModules(Thespeon::ActorPack::ActorModule* Module); // finds language modules used by argument module that are not used by any other module. (safe to remove)
-private:
-    inline static TWeakObjectPtr<UModuleManager> CachedInstance = nullptr;
-    TMap<FString, TUniquePtr<Thespeon::Core::Module>> Modules; // map of ModuleID to Module.
+	GENERATED_BODY()
+  public:
+	void Initialize(FSubsystemCollectionBase& Collection) override;
+	void Deinitialize() override;
+	static UModuleManager* Get();
 
+	template <typename T> void RegisterModule(Thespeon::Core::FModuleEntry ModuleEntry)
+	{
+		static_assert(std::is_base_of_v<Thespeon::Core::Module, T>, "T must derive from Module");
+		if (!Modules.Contains(ModuleEntry.ModuleID))
+		{
+			Modules.Add(ModuleEntry.ModuleID, MakeUnique<T>(ModuleEntry)); // assumes T has ctor(TModuleEntry)
+			LINGO_LOG_FUNC(EVerbosityLevel::Info, TEXT("Registered module '%s'."), *ModuleEntry.ModuleID);
+		}
+	}
+	bool TryDeregisterModule(FString ModuleID); // deregisters all workloads in a module unless used by other module.
+	bool IsRegistered(FString ModuleID);        // checks if present in map.
+	template <typename T> T* GetModule(Thespeon::Core::FModuleEntry ModuleEntry, bool ShouldCreate = true)
+	{
+		if (ModuleEntry.ModuleID.IsEmpty())
+		{
+			LINGO_LOG(EVerbosityLevel::Error, TEXT("Invalid ModuleEntry provided."));
+			return nullptr;
+		}
+		static_assert(std::is_base_of_v<Thespeon::Core::Module, T>, "T must derive from Module");
+
+		if (!Modules.Contains(ModuleEntry.ModuleID))
+		{
+			if (!ShouldCreate)
+			{
+				LINGO_LOG(EVerbosityLevel::Error, TEXT("Module '%s' not found."), *ModuleEntry.ModuleID);
+				return nullptr;
+			}
+			LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Module '%s' not found. Creating "), *ModuleEntry.ModuleID);
+			RegisterModule<T>(ModuleEntry);
+		}
+		return static_cast<T*>(Modules[ModuleEntry.ModuleID].Get());
+	}
+	// Resource overlap detection - now uses safe dynamic_cast instead of enum + static_cast
+	TSet<FString> GetWorkloadIDsToRemove(
+	    Thespeon::Core::Module* Module,
+	    EBackendType BackendType
+	); // returns file md5s that are not in any other module (safe to remove)
+
+	/**
+	 * Finds language modules used by the given character module that are not used by any other character module.
+	 * Used to determine which language modules can be safely removed when a character module is removed.
+	 */
+	TSet<FString> GetNonOverlappingModelLangModules(Thespeon::Character::CharacterModule* Module);
+
+  private:
+	inline static TWeakObjectPtr<UModuleManager> CachedInstance = nullptr;
+	TMap<FString, TUniquePtr<Thespeon::Core::Module>> Modules; // map of ModuleID to Module.
 };

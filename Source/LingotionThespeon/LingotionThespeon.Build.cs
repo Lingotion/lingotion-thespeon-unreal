@@ -8,6 +8,11 @@ public class LingotionThespeon : ModuleRules
 	public LingotionThespeon(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = PCHUsageMode.NoPCHs;
+        bUseUnity = false;
+
+        // Add protobuf include path directly
+		string ProtobufSrcPath = Path.Combine(ModuleDirectory, "..", "ThirdParty", "Protobuf", "protobuf", "src");
+        PublicSystemIncludePaths.Add(ProtobufSrcPath);
 
 		PublicIncludePaths.AddRange(
 			new string[] {
@@ -32,7 +37,9 @@ public class LingotionThespeon : ModuleRules
 				"NNE",
 				"NNERuntimeORT",
 				"AudioMixer",
-				"Projects",				// ... add other public dependencies that you statically link with here ...
+				"Projects",
+				"DeveloperSettings",
+				"Protobuf",
 			}
 			);
 
@@ -45,7 +52,6 @@ public class LingotionThespeon : ModuleRules
 			}
 			);
 
-
 		DynamicallyLoadedModuleNames.AddRange(
 			new string[]
 			{
@@ -53,7 +59,7 @@ public class LingotionThespeon : ModuleRules
 			}
 			);
 
-		// Make sure the pack manifest as well as imported .json files are included in a build
-		RuntimeDependencies.Add(Path.Combine(PluginDirectory, "RuntimeData", "**.json"), StagedFileType.NonUFS);
+		// Make sure the manifest as well as imported .json files are included in a build
+		RuntimeDependencies.Add(Path.Combine(PluginDirectory, "RuntimeData", "..."), StagedFileType.NonUFS);
 	}
 }

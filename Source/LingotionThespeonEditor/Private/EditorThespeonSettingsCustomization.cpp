@@ -1,4 +1,4 @@
-// This code and software are protected by intellectual property law and is the property of Lingotion AB, reg. no. 558341-4138, Sweden. The code and software may only be used and distributed according to the Terms of Service and Use found at www.lingotion.com.
+// This code and software are protected by intellectual property law and is the property of Lingotion AB, reg. no. 559341-4138, Sweden. The code and software may only be used and distributed according to the Terms of Service and Use found at www.lingotion.com.
 
 #include "EditorThespeonSettingsCustomization.h"
 #include "DetailLayoutBuilder.h"
@@ -11,51 +11,46 @@
 
 TSharedRef<IDetailCustomization> FEditorThespeonSettingsCustomization::MakeInstance()
 {
-    return MakeShareable(new FEditorThespeonSettingsCustomization);
+	return MakeShareable(new FEditorThespeonSettingsCustomization);
 }
 
 void FEditorThespeonSettingsCustomization::CustomizeDetails(IDetailLayoutBuilder& DetailBuilder)
 {
 
-    auto GetWarningText = []() -> FText
-{
-    const auto* Settings = GetDefault<UEditorThespeonSettings>();
-    switch (Settings->ValidationState)
-    {
-        case ELicenseValidationState::Empty:
-            return FText::FromString("No license key entered.");
-        case ELicenseValidationState::Invalid:
-            return FText::FromString("Invalid license key.");
-        case ELicenseValidationState::Valid:
-            return FText::FromString("License key is valid!");
-        default:
-            return FText::GetEmpty();
-    }
-};
+	auto GetWarningText = []() -> FText
+	{
+		const auto* Settings = GetDefault<UEditorThespeonSettings>();
+		switch (Settings->ValidationState)
+		{
+			case ELicenseValidationState::Empty:
+				return FText::FromString("No license key entered.");
+			case ELicenseValidationState::Invalid:
+				return FText::FromString("Invalid license key.");
+			case ELicenseValidationState::Valid:
+				return FText::FromString("License key is valid!");
+			default:
+				return FText::GetEmpty();
+		}
+	};
 
-    auto GetTextColor = []() -> FSlateColor
-{
-    const auto* Settings = GetDefault<UEditorThespeonSettings>();
-    switch (Settings->ValidationState)
-    {
-        case ELicenseValidationState::Valid:
-            return FSlateColor(FLinearColor::Green);
-        default:
-            return FSlateColor(FLinearColor::Yellow);
-    }
-};
+	auto GetTextColor = []() -> FSlateColor
+	{
+		const auto* Settings = GetDefault<UEditorThespeonSettings>();
+		switch (Settings->ValidationState)
+		{
+			case ELicenseValidationState::Valid:
+				return FSlateColor(FLinearColor::Green);
+			default:
+				return FSlateColor(FLinearColor::Yellow);
+		}
+	};
 
-    IDetailCategoryBuilder& Category = DetailBuilder.EditCategory("License");
-    auto row = Category.AddCustomRow(FText::FromString("LicenseWarning"))
-        .WholeRowContent()
-        [
-            SNew(STextBlock)
-            .Text(TAttribute<FText>::CreateLambda(GetWarningText))
-            .ColorAndOpacity(TAttribute<FSlateColor>::CreateLambda(GetTextColor))
-        ];
+	IDetailCategoryBuilder& Category = DetailBuilder.EditCategory("License");
+	auto row = Category.AddCustomRow(FText::FromString("LicenseWarning"))
+	               .WholeRowContent()[SNew(STextBlock)
+	                                      .Text(TAttribute<FText>::CreateLambda(GetWarningText))
+	                                      .ColorAndOpacity(TAttribute<FSlateColor>::CreateLambda(GetTextColor))];
 
-    // We show the warningtext instead of the value of the enum, so hide the enum prop
-    DetailBuilder.HideProperty(GET_MEMBER_NAME_CHECKED(UEditorThespeonSettings, ValidationState));
-    
+	// We show the warningtext instead of the value of the enum, so hide the enum prop
+	DetailBuilder.HideProperty(GET_MEMBER_NAME_CHECKED(UEditorThespeonSettings, ValidationState));
 }
-
