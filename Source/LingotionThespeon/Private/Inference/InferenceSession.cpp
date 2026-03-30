@@ -28,23 +28,22 @@ const TCHAR* LexToString(ESessionStopReason Reason)
 }
 
 InferenceSession::InferenceSession(const FLingotionModelInput& InInput, const FInferenceConfig InConfig, const FString& InSessionID)
-    : InputConfig(InConfig), SessionID(InSessionID), StopReason(ESessionStopReason::None)
+    : InputConfig(InConfig), SessionID(InSessionID)
 {
 	// Copy all input data from struct
 	Input = InInput;
-	bStopRequested.Store(false);
 }
 
 InferenceSession::~InferenceSession()
 {
-	AliveToken->Store(false);
+	AliveToken->store(false);
 	Stop();
 }
 
 void InferenceSession::Stop()
 {
-	// Only process stop once - use exchange to atomically set and check previous value
-	if (!bStopRequested.Exchange(true))
+	FScopeLock Lock(&StopLock);
+	if (!bStopRequested.exchange(true))
 	{
 		// Default to user cancelled if no specific reason was set
 		if (StopReason == ESessionStopReason::None)
@@ -56,12 +55,13 @@ void InferenceSession::Stop()
 
 bool InferenceSession::StopWithReason(ESessionStopReason Reason)
 {
-	if (bStopRequested.Load())
+	FScopeLock Lock(&StopLock);
+	if (bStopRequested.load())
 	{
-		return true; // Already stopped
+		return false; // Already stopped - return false to indicate we didn't set the reason
 	}
 	StopReason = Reason;
-	Stop();
+	bStopRequested.store(true);
 	return true;
 }
 

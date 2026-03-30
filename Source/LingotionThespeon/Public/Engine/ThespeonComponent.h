@@ -5,25 +5,57 @@
 #include "Components/ActorComponent.h"
 #include "InferenceConfig.h"
 #include "Core/ThespeonDataPacket.h"
+#include <atomic>
 #include "ThespeonComponent.generated.h"
 
 class UAudioStreamComponent;
 
-// Forward declaration to avoid including private header
+// Forward declarations to avoid including private headers
 namespace Thespeon
 {
 namespace Inference
 {
 class ThespeonInference;
-}
+class FPreloadSession;
+} // namespace Inference
 } // namespace Thespeon
 
-// TUniquePtr with forward declared type needs to be paired with a destructor
-// for the compiler to consider it complete
+// TUniquePtr with forward declared types needs custom deleters
+// so the compiler can destroy them without requiring a complete type in the header.
 struct FThespeonInferenceDeleter
 {
 	void operator()(Thespeon::Inference::ThespeonInference* Ptr) const;
 };
+
+struct FPreloadSessionDeleter
+{
+	void operator()(Thespeon::Inference::FPreloadSession* Ptr) const;
+};
+
+/** A single entry in a PreloadCharacterGroup call. */
+USTRUCT(BlueprintType)
+struct FPreloadEntry
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadWrite, Category = "Lingotion Thespeon")
+	FString CharacterName;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Lingotion Thespeon")
+	EThespeonModuleType ModuleType = EThespeonModuleType::None;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Lingotion Thespeon")
+	FInferenceConfig InferenceConfig;
+};
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnAudioReceived, FString, SessionID, const TArray<float>&, SynthesisData);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnAudioSampleRequestReceived, FString, SessionID, const TArray<int64>&, TriggerAudioSamples);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnSynthesisComplete, FString, SessionID);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(
+    FOnPreloadComplete, bool, PreloadSuccess, FString, CharacterName, EThespeonModuleType, ModuleType, EBackendType, BackendType
+);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPreloadGroupComplete, FString, PreloadGroupId, bool, bAllSucceeded);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnSynthesisFailed, FString, SessionID);
 
 /** Main component needed to use Lingotion Thespeon. Needs to be added to an Actor. */
 UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
@@ -47,6 +79,7 @@ class LINGOTIONTHESPEON_API UThespeonComponent : public UActorComponent
 
 	/**
 	 * @brief Attempts to load the files for a specific character and module type into memory.
+	 *        Fires OnPreloadComplete when done. For grouped preloads use PreloadCharacterGroup.
 	 *
 	 * @param CharacterName The name of the character.
 	 * @param ModuleType The specific module type to load.
@@ -54,6 +87,18 @@ class LINGOTIONTHESPEON_API UThespeonComponent : public UActorComponent
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Lingotion Thespeon")
 	void PreloadCharacter(FString CharacterName, EThespeonModuleType ModuleType, FInferenceConfig InferenceConfig = FInferenceConfig());
+
+	/**
+	 * @brief Preloads all entries in a single atomic group.
+	 *        All counts are registered before any thread starts, so OnPreloadGroupComplete
+	 *        cannot fire prematurely regardless of how fast individual preloads complete.
+	 *        Prefer this over calling PreloadCharacter in a loop with a shared group ID.
+	 *
+	 * @param Characters The list of characters and module types to preload.
+	 * @param PreloadGroupId Identifier for the group. OnPreloadGroupComplete fires once when all are done.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Lingotion Thespeon")
+	void PreloadCharacterGroup(TArray<FPreloadEntry> Characters, FString PreloadGroupId);
 
 	/**
 	 * @brief Attempts to unload a character of the given module type on the provided backend.
@@ -70,7 +115,6 @@ class LINGOTIONTHESPEON_API UThespeonComponent : public UActorComponent
 	void OnUnregister() override;
 	void BeginDestroy() override;
 
-	DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnAudioReceived, FString, SessionID, const TArray<float>&, SynthesisData);
 	/** @brief Called whenever synthesized audio is available. Replaces basic audio playback if bound.
 	 * @param SessionID The Session that the data comes from.
 	 * @param SynthesisData The audio data as an array of floats.
@@ -78,7 +122,6 @@ class LINGOTIONTHESPEON_API UThespeonComponent : public UActorComponent
 	UPROPERTY(BlueprintAssignable, Category = "Lingotion Thespeon|Audio")
 	FOnAudioReceived OnAudioReceived;
 
-	DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnAudioSampleRequestReceived, FString, SessionID, const TArray<int64>&, TriggerAudioSamples);
 	/** @brief Called when the sample indices corresponding to the trigger input character are ready.
 	 * Combined with FOnAudioReceived, these can be used to trigger specific events when a specific word is spoken.
 	 * @param SessionID The Session that the data comes from.
@@ -87,17 +130,13 @@ class LINGOTIONTHESPEON_API UThespeonComponent : public UActorComponent
 	UPROPERTY(BlueprintAssignable, Category = "Lingotion Thespeon|Audio")
 	FOnAudioSampleRequestReceived OnAudioSampleRequestReceived;
 
-	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnSynthesisComplete, FString, SessionID);
 	/** @brief Called when final packet is delivered to caller.
 	 * @param SessionID The Session that the data comes from.
 	 */
 	UPROPERTY(BlueprintAssignable, Category = "Lingotion Thespeon|Audio")
 	FOnSynthesisComplete OnSynthesisComplete;
 
-	DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(
-	    FOnPreloadComplete, bool, PreloadSuccess, FString, CharacterName, EThespeonModuleType, ModuleType, EBackendType, BackendType
-	);
-	/** @brief Called when preload is complete.
+	/** @brief Called when an individual preload is complete.
 	 * @param PreloadSuccess True if preload succeeded. False otherwise.
 	 * @param CharacterName The name of the character that was attempted to be preloaded.
 	 * @param ModuleType The module type that was attempted to be preloaded.
@@ -106,7 +145,13 @@ class LINGOTIONTHESPEON_API UThespeonComponent : public UActorComponent
 	UPROPERTY(BlueprintAssignable, Category = "Lingotion Thespeon|Audio")
 	FOnPreloadComplete OnPreloadComplete;
 
-	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnSynthesisFailed, FString, SessionID);
+	/** @brief Called when all preloads in a group are complete.
+	 * @param PreloadGroupId The group ID passed to PreloadCharacter calls.
+	 * @param bAllSucceeded True if every preload in the group succeeded.
+	 */
+	UPROPERTY(BlueprintAssignable, Category = "Lingotion Thespeon|Audio")
+	FOnPreloadGroupComplete OnPreloadGroupComplete;
+
 	/** @brief Called when synthesis has failed.
 	 * @param SessionID The session ID of the failed synthesis.
 	 */
@@ -123,7 +168,7 @@ class LINGOTIONTHESPEON_API UThespeonComponent : public UActorComponent
 	UFUNCTION(BlueprintCallable, Category = "Lingotion Thespeon")
 	bool IsSynthesizing() const
 	{
-		return bIsSynthesizing;
+		return bIsSynthesizing.load();
 	}
 
   private:
@@ -132,7 +177,9 @@ class LINGOTIONTHESPEON_API UThespeonComponent : public UActorComponent
 		FString CharacterName;
 		EThespeonModuleType ModuleType;
 		EBackendType BackendType;
+		FString PreloadGroupId;
 
+		// PreloadGroupId intentionally excluded — dedup is by character/module/backend only.
 		bool operator==(const PreloadRequest& Other) const
 		{
 			return CharacterName == Other.CharacterName && ModuleType == Other.ModuleType && BackendType == Other.BackendType;
@@ -145,19 +192,35 @@ class LINGOTIONTHESPEON_API UThespeonComponent : public UActorComponent
 		FString SessionId;
 		FInferenceConfig InferenceConfig;
 	};
-	UAudioStreamComponent* StreamComp; // keep it from GC. TODO: REMOVE BEFORE RELEASE?
+
+	void PruneFinishedPreloadThreads();
 	void ProcessPendingRequests();
 	void RunSynthesisRequest(SynthRequest Request);
 	void RunPreloadRequest(PreloadRequest Request);
+	void ResetState();
 	void CleanupThread();
+	/** Joins and destroys the preload thread. Safe to call multiple times. */
+	void CleanupPreloadThreads();
 	EThreadPriority ConvertToNativeThreadPriority(EThreadPriorityWrapper Wrapper) const;
 	void PacketHandler(const FString& SessionID, const Thespeon::Core::FThespeonDataPacket& Packet);
 	TQueue<TArray<float>> AudioDataQueue;
 	TQueue<SynthRequest> SynthRequestQueue;
 	TArray<PreloadRequest> PreloadRequests;
-	int CurrentDataLength = 0; // in number of T (elements of ThespeonDataPacket TArray)
-	bool bIsSynthesizing = false;
-	bool bIsPreloading = false;
-	FRunnableThread* SessionThread = nullptr;
+	std::atomic<int32> CurrentDataLength{0}; // in number of T (elements of ThespeonDataPacket TArray)
+	std::atomic<bool> bIsSynthesizing{false};
+	std::atomic<int32> ActivePreloadCount{0};
+	static constexpr int32 MaxConcurrentPreloads = 4;
+
+	// Synthesis thread and session
+	TUniquePtr<FRunnableThread> SessionThread;
 	TUniquePtr<Thespeon::Inference::ThespeonInference, FThespeonInferenceDeleter> Session;
+
+	// Preload threads and sessions — supports multiple parallel preloads.
+	// All threads are joined via CleanupPreloadThreads() for deterministic teardown in OnUnregister.
+	TArray<TUniquePtr<FRunnableThread>> PreloadThreads;
+	TArray<TUniquePtr<Thespeon::Inference::FPreloadSession, FPreloadSessionDeleter>> ActivePreloadSessions;
+
+	// Per-group tracking for OnPreloadGroupComplete.
+	TMap<FString, int32> PreloadGroupPendingCounts;
+	TMap<FString, bool> PreloadGroupHadFailure;
 };

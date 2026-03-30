@@ -39,6 +39,7 @@ public class LingotionThespeon : ModuleRules
 				"AudioMixer",
 				"Projects",
 				"DeveloperSettings",
+				"InputCore",
 				"Protobuf",
 			}
 			);

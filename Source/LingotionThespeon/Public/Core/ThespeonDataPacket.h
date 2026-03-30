@@ -74,7 +74,7 @@ struct FThespeonDataPacket
 	 *
 	 * @param InCallbackType The type of synthesis callback this packet represents.
 	 */
-	FThespeonDataPacket(SynthCallbackType InCallbackType) : CallbackType(InCallbackType){};
+	FThespeonDataPacket(SynthCallbackType InCallbackType) : CallbackType(InCallbackType) {}
 };
 
 } // namespace Core

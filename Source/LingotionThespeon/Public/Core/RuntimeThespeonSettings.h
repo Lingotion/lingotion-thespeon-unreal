@@ -72,7 +72,6 @@ class LINGOTIONTHESPEON_API URuntimeThespeonSettings : public UDeveloperSettings
 {
 	GENERATED_BODY()
 
-  protected:
   public:
 #if WITH_EDITOR
 	FText GetSectionText() const override

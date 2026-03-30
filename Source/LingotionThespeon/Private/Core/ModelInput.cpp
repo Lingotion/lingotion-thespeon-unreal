@@ -29,6 +29,7 @@ bool FLingotionModelInput::ValidateCharacterModule(const EThespeonModuleType Fal
 	}
 	return true;
 }
+
 // FModelInput is now a struct with inline default constructor
 // No additional implementation needed
 bool FLingotionModelInput::ValidateAndPopulate(
@@ -96,21 +97,14 @@ bool FLingotionModelInput::ValidateAndPopulate(
 	for (int32 Idx = 0; Idx < this->Segments.Num(); ++Idx)
 	{
 		FLingotionInputSegment& Segment = this->Segments[Idx];
-		if (Idx == 0)
-		{
-			Segment.Text = Segment.Text.TrimStart();
-		}
-		else if (Idx == this->Segments.Num() - 1)
-		{
-			Segment.Text = Segment.Text.TrimEnd();
-		}
-		FString CleanedText = FTextPreprocessor::CleanText(Segment.Text);
+		FString CleanedText = FTextPreprocessor::CleanText(Segment.Text, GetSegmentPosition(Idx, this->Segments.Num()));
 		if (CleanedText.IsEmpty())
 		{
 			LINGO_LOG(EVerbosityLevel::Error, TEXT("Segment text cannot be empty. Please make sure each segment has meaningful text content."));
 			return false;
 		}
 		Segment.Text = CleanedText;
+
 		if (Segment.Emotion == EEmotion::None)
 		{
 			Segment.Emotion = this->DefaultEmotion;
@@ -118,29 +112,8 @@ bool FLingotionModelInput::ValidateAndPopulate(
 			    EVerbosityLevel::Debug, TEXT("Segment emotion is None. Using default emotion %s."), *UEnum::GetValueAsString(Segment.Emotion)
 			);
 		}
-		if (Segment.Language.IsUndefined())
-		{
-			Segment.Language = this->DefaultLanguage;
-			LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Segment language is undefined. Using default language %s."), *Segment.Language.ToJson());
-		}
-		else
-		{
-			FLingotionLanguage BestMatch = Thespeon::Core::BestLanguageMatch(CandidateLanguages, Segment.Language);
-			if (BestMatch.IsUndefined())
-			{
-				LINGO_LOG(
-				    EVerbosityLevel::Warning,
-				    TEXT("No matching language found in character module for segment language %s, defaulting to default language %s"),
-				    *Segment.Language.ToJson(),
-				    *this->DefaultLanguage.ToJson()
-				);
-				Segment.Language = this->DefaultLanguage;
-			}
-			else
-			{
-				Segment.Language = BestMatch;
-			}
-		}
+
+		Segment.Language = ResolveSegmentLanguage(Segment, CandidateLanguages);
 
 		// Split segment by numbers - this converts numbers to phonemes in separate CustomPronounced segments
 		// This prevents double-phonemization of already converted numbers
@@ -270,10 +243,37 @@ bool FLingotionModelInput::SetModuleTypeIfInvalid(UManifestHandler* Manifest, ET
 	return true;
 }
 
+FLingotionLanguage
+FLingotionModelInput::ResolveSegmentLanguage(const FLingotionInputSegment& Segment, const TArray<FLingotionLanguage>& CandidateLanguages) const
+{
+	if (Segment.Language.IsUndefined())
+	{
+		LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Segment language is undefined. Using default language %s."), *this->DefaultLanguage.ToJson());
+		return this->DefaultLanguage;
+	}
+
+	FLingotionLanguage BestMatch = Thespeon::Core::BestLanguageMatch(CandidateLanguages, Segment.Language);
+	if (BestMatch.IsUndefined())
+	{
+		LINGO_LOG(
+		    EVerbosityLevel::Warning,
+		    TEXT("No matching language found in character module for segment language %s, defaulting to default language %s"),
+		    *Segment.Language.ToJson(),
+		    *this->DefaultLanguage.ToJson()
+		);
+		return this->DefaultLanguage;
+	}
+
+	return BestMatch;
+}
+
 TArray<FLingotionLanguage> FLingotionModelInput::GetCandidateLanguages(UManifestHandler* Manifest, UModuleManager* ModuleManager)
 {
 	Thespeon::Core::FModuleEntry Entry = Manifest->GetCharacterModuleEntry(this->CharacterName, this->ModuleType);
-	Thespeon::Character::CharacterModule* CharacterModule = ModuleManager->GetModule<Thespeon::Character::CharacterModule>(Entry, false);
+	// TSharedPtr keeps module alive for this scope; raw pointer used for downstream API compatibility
+	TSharedPtr<Thespeon::Character::CharacterModule, ESPMode::ThreadSafe> CharacterModulePtr =
+	    ModuleManager->GetModule<Thespeon::Character::CharacterModule>(Entry, false);
+	Thespeon::Character::CharacterModule* CharacterModule = CharacterModulePtr.Get();
 
 	TArray<FLingotionLanguage> CandidateLanguages = CharacterModule->GetSupportedLanguages();
 	TArray<FLanguageModuleInfo> ImportedLanguages = Manifest->GetAllLanguageModules();

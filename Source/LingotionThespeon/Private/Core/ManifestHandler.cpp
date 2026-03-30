@@ -225,69 +225,71 @@ Thespeon::Core::FModuleEntry UManifestHandler::GetLanguageModuleEntry(const FStr
 	return Thespeon::Core::FModuleEntry(ModuleName, JsonPath, ReadVersionObject(ModuleObj));
 }
 
+// Iterates all valid entries in character_modules, invoking Callback for each.
+// Handles root validation and character_modules extraction; skips invalid module objects.
+void UManifestHandler::IterateCharacterModules(TFunctionRef<void(const FString&, const TSharedPtr<FJsonObject>&)> Callback) const
+{
+	if (IsRootInvalid())
+	{
+		return;
+	}
+
+	TSharedPtr<FJsonObject> CharacterModules;
+	if (!TryGetCharacterModules(CharacterModules))
+	{
+		return;
+	}
+
+	for (const auto& ModulePair : CharacterModules->Values)
+	{
+		const TSharedPtr<FJsonObject> ModuleObj = ModulePair.Value->AsObject();
+		if (!ModuleObj.IsValid())
+		{
+			continue;
+		}
+		Callback(ModulePair.Key, ModuleObj);
+	}
+}
+
 // Extracts all languages from a specific character module's "languages" array.
 // Each language entry is parsed into an FLingotionLanguage using iso639_2 and optionally iso3166_1 fields.
 TArray<FLingotionLanguage> UManifestHandler::GetAllLanguagesInCharacterModule(const FString& ModuleName) const
 {
 	TArray<FLingotionLanguage> result;
-	if (IsRootInvalid())
-	{
-		return result;
-	}
 
-	// Access character modules
-	const TSharedPtr<FJsonObject>* CharacterModulesObjPtr = nullptr;
-	if (!Root->TryGetObjectField(TEXT("character_modules"), CharacterModulesObjPtr) || !CharacterModulesObjPtr)
-	{
-		LINGO_LOG(
-		    EVerbosityLevel::Error,
-		    TEXT(
-		        "'character_modules' not found in manifest. Manifest may be malformed. Try deleting the LingotionThespeonManifest.json file and recompiling your project."
-		    )
-		);
-		return result;
-	}
-	const TSharedPtr<FJsonObject>& CharacterModules = *CharacterModulesObjPtr;
+	IterateCharacterModules(
+	    [&](const FString& ModuleId, const TSharedPtr<FJsonObject>& ModuleObj)
+	    {
+		    if (ModuleId != ModuleName)
+		    {
+			    return;
+		    }
 
-	// Find the module by key == ModuleName
-	const TSharedPtr<FJsonValue>* ValuePtr = CharacterModules->Values.Find(ModuleName);
-	if (!ValuePtr || !(*ValuePtr).IsValid())
-	{
-		LINGO_LOG(EVerbosityLevel::Error, TEXT("Module %s is not a valid character module."), *ModuleName);
-		return result;
-	}
+		    const TArray<TSharedPtr<FJsonValue>>* LanguagesArray = nullptr;
+		    ModuleObj->TryGetArrayField(TEXT("languages"), LanguagesArray);
 
-	const TSharedPtr<FJsonObject> ModuleObj = (*ValuePtr)->AsObject();
-	if (!ModuleObj.IsValid())
-	{
-		LINGO_LOG(EVerbosityLevel::Error, TEXT("Character module '%s' is not a valid object."), *ModuleName);
-		return result;
-	}
+		    if (!LanguagesArray)
+		    {
+			    return;
+		    }
 
-	// Check the "languages" array
-	const TArray<TSharedPtr<FJsonValue>>* LanguagesArray = nullptr;
-	ModuleObj->TryGetArrayField(TEXT("languages"), LanguagesArray);
-
-	if (LanguagesArray)
-	{
-		for (const auto& LanguageValue : *LanguagesArray)
-		{
-			const TSharedPtr<FJsonObject> LangObj = LanguageValue->AsObject();
-			FString iso639_2;
-			FString iso3166_1;
-			LangObj->TryGetStringField(TEXT("iso639_2"), iso639_2);
-			if (LangObj->TryGetStringField(TEXT("iso3166_1"), iso3166_1))
-			{
-				FLingotionLanguage Lang(iso639_2, TEXT(""), TEXT(""), iso3166_1);
-				result.Add(Lang);
-			}
-			else
-			{
-				FLingotionLanguage Lang(iso639_2);
-				result.Add(Lang);
-			}
-		}
-	}
+		    for (const auto& LanguageValue : *LanguagesArray)
+		    {
+			    const TSharedPtr<FJsonObject> LangObj = LanguageValue->AsObject();
+			    FString iso639_2;
+			    FString iso3166_1;
+			    LangObj->TryGetStringField(TEXT("iso639_2"), iso639_2);
+			    if (LangObj->TryGetStringField(TEXT("iso3166_1"), iso3166_1))
+			    {
+				    result.Add(FLingotionLanguage(iso639_2, TEXT(""), TEXT(""), iso3166_1));
+			    }
+			    else
+			    {
+				    result.Add(FLingotionLanguage(iso639_2));
+			    }
+		    }
+	    }
+	);
 
 	return result;
 }
@@ -296,46 +298,25 @@ TArray<FLingotionLanguage> UManifestHandler::GetAllLanguagesInCharacterModule(co
 TSet<FString> UManifestHandler::GetAllAvailableCharacters() const
 {
 	TSet<FString> result;
-	if (IsRootInvalid())
-	{
-		return result;
-	}
-	// Access character modules
-	const TSharedPtr<FJsonObject>* CharacterModulesPtr = nullptr;
-	if (!Root->TryGetObjectField(TEXT("character_modules"), CharacterModulesPtr) || !CharacterModulesPtr)
-	{
-		LINGO_LOG(
-		    EVerbosityLevel::Error,
-		    TEXT(
-		        "'character_modules' not found in manifest. Manifest may be malformed. Try deleting the LingotionThespeonManifest.json file and recompiling your project."
-		    )
-		);
-		return result;
-	}
 
-	const TSharedPtr<FJsonObject>& CharacterModules = *CharacterModulesPtr;
+	IterateCharacterModules(
+	    [&](const FString& /*ModuleId*/, const TSharedPtr<FJsonObject>& ModuleObj)
+	    {
+		    const TArray<TSharedPtr<FJsonValue>>* CharactersArray = nullptr;
+		    ModuleObj->TryGetArrayField(TEXT("characters"), CharactersArray);
 
-	// Iterate through modules
-	for (const auto& ModulePair : CharacterModules->Values)
-	{
-		const TSharedPtr<FJsonObject> ModuleObj = ModulePair.Value->AsObject();
-		if (!ModuleObj.IsValid())
-		{
-			continue;
-		}
-		// Check characters array
-		const TArray<TSharedPtr<FJsonValue>>* CharactersArray = nullptr;
+		    if (!CharactersArray)
+		    {
+			    return;
+		    }
 
-		ModuleObj->TryGetArrayField(TEXT("characters"), CharactersArray);
+		    for (const auto& CharacterValue : *CharactersArray)
+		    {
+			    result.Emplace(CharacterValue->AsString());
+		    }
+	    }
+	);
 
-		if (CharactersArray)
-		{
-			for (const auto& CharacterValue : *CharactersArray)
-			{
-				result.Emplace(CharacterValue->AsString());
-			}
-		}
-	}
 	return result;
 }
 
@@ -344,57 +325,34 @@ TSet<FString> UManifestHandler::GetAllAvailableCharacters() const
 TMap<EThespeonModuleType, FString> UManifestHandler::GetModuleTypesOfCharacter(const FString& CharacterName) const
 {
 	TMap<EThespeonModuleType, FString> result;
-	if (IsRootInvalid())
-	{
-		return result;
-	}
-	// Access character modules
-	const TSharedPtr<FJsonObject>* CharacterModulesPtr = nullptr;
-	if (!Root->TryGetObjectField(TEXT("character_modules"), CharacterModulesPtr) || !CharacterModulesPtr)
-	{
-		LINGO_LOG(
-		    EVerbosityLevel::Error,
-		    TEXT(
-		        "'character_modules' not found in manifest. Manifest may be malformed. Try deleting the LingotionThespeonManifest.json file and recompiling your project."
-		    )
-		);
-		return result;
-	}
 
-	const TSharedPtr<FJsonObject>& CharacterModules = *CharacterModulesPtr;
+	IterateCharacterModules(
+	    [&](const FString& ModuleId, const TSharedPtr<FJsonObject>& ModuleObj)
+	    {
+		    const TArray<TSharedPtr<FJsonValue>>* CharactersArray = nullptr;
+		    ModuleObj->TryGetArrayField(TEXT("characters"), CharactersArray);
 
-	// Iterate through modules
-	for (const auto& ModulePair : CharacterModules->Values)
-	{
-		const TSharedPtr<FJsonObject> ModuleObj = ModulePair.Value->AsObject();
-		if (!ModuleObj.IsValid())
-		{
-			continue;
-		}
-		// Check characters array
-		const TArray<TSharedPtr<FJsonValue>>* CharactersArray = nullptr;
+		    if (!CharactersArray)
+		    {
+			    return;
+		    }
 
-		ModuleObj->TryGetArrayField(TEXT("characters"), CharactersArray);
+		    for (const auto& CharacterValue : *CharactersArray)
+		    {
+			    if (CharacterName == CharacterValue->AsString())
+			    {
+				    FString ModuleTypeString;
+				    ModuleObj->TryGetStringField(TEXT("quality"), ModuleTypeString);
+				    EThespeonModuleType ModuleType = FindModuleType(ModuleTypeString);
+				    if (ModuleType != EThespeonModuleType::None)
+				    {
+					    result.Emplace(ModuleType, ModuleId);
+				    }
+			    }
+		    }
+	    }
+	);
 
-		if (CharactersArray)
-		{
-			for (const auto& CharacterValue : *CharactersArray)
-			{
-				FString CurrentCharacterName = CharacterValue->AsString();
-				// add module name to array corresponding to character
-				if (CharacterName == CurrentCharacterName)
-				{
-					FString ModuleTypeString;
-					ModuleObj->TryGetStringField(TEXT("quality"), ModuleTypeString);
-					EThespeonModuleType ModuleType = FindModuleType(ModuleTypeString);
-					if (ModuleType != EThespeonModuleType::None)
-					{
-						result.Emplace(ModuleType, ModulePair.Key); // Move-construct if possible
-					}
-				}
-			}
-		}
-	}
 	return result;
 }
 
@@ -424,46 +382,44 @@ Thespeon::Core::FVersion UManifestHandler::ReadVersionObject(const TSharedPtr<FJ
 	return Thespeon::Core::FVersion(Major, Minor, Patch);
 }
 
+FString UManifestHandler::GetQuality(const FString& QualityString, const FString& ModuleID) const
+{
+	const EThespeonModuleType* ModuleTypePtr = StringToModuleType.Find(QualityString);
+	if (ModuleTypePtr)
+	{
+		const FString* QualityPtr = ModuleTypeToFrontEndString.Find(*ModuleTypePtr);
+		return QualityPtr ? *QualityPtr : TEXT("");
+	}
+
+	LINGO_LOG(EVerbosityLevel::Warning, TEXT("Unknown quality string '%s' for module '%s'"), *QualityString, *ModuleID);
+	return TEXT("");
+}
+
 TArray<FCharacterModuleInfo> UManifestHandler::GetAllCharacterModules() const
 {
 	TArray<FCharacterModuleInfo> Result;
 
-	if (!Root.IsValid())
-	{
-		return Result;
-	}
+	IterateCharacterModules(
+	    [&](const FString& ModuleId, const TSharedPtr<FJsonObject>& ModuleObj)
+	    {
+		    FCharacterModuleInfo Info;
+		    Info.ModuleID = ModuleId;
+		    ModuleObj->TryGetStringField(TEXT("name"), Info.Name);
+		    ModuleObj->TryGetStringField(TEXT("jsonpath"), Info.JsonPath);
+		    FString typeString = "";
+		    ModuleObj->TryGetStringField(TEXT("quality"), typeString);
+		    Info.Quality = GetQuality(typeString, Info.ModuleID);
 
-	const TSharedPtr<FJsonObject>* CharacterModulesPtr = nullptr;
-	if (Root->TryGetObjectField(TEXT("character_modules"), CharacterModulesPtr) && CharacterModulesPtr)
-	{
-		const TSharedPtr<FJsonObject>& CharacterModules = *CharacterModulesPtr;
+		    // Get character name (first element of characters array)
+		    const TArray<TSharedPtr<FJsonValue>>* CharactersArray = nullptr;
+		    if (ModuleObj->TryGetArrayField(TEXT("characters"), CharactersArray) && CharactersArray && CharactersArray->Num() > 0)
+		    {
+			    Info.CharacterName = (*CharactersArray)[0]->AsString();
+		    }
 
-		for (const auto& ModulePair : CharacterModules->Values)
-		{
-			const TSharedPtr<FJsonObject> ModuleObj = ModulePair.Value->AsObject();
-			if (!ModuleObj.IsValid())
-			{
-				continue;
-			}
-
-			FCharacterModuleInfo Info;
-			Info.ModuleID = ModulePair.Key;
-			ModuleObj->TryGetStringField(TEXT("name"), Info.Name);
-			ModuleObj->TryGetStringField(TEXT("jsonpath"), Info.JsonPath);
-			FString typeString = "";
-			ModuleObj->TryGetStringField(TEXT("quality"), typeString);
-			Info.Quality = ModuleTypeToFrontEndString[StringToModuleType[typeString]];
-
-			// Get character name (first element of characters array)
-			const TArray<TSharedPtr<FJsonValue>>* CharactersArray = nullptr;
-			if (ModuleObj->TryGetArrayField(TEXT("characters"), CharactersArray) && CharactersArray && CharactersArray->Num() > 0)
-			{
-				Info.CharacterName = (*CharactersArray)[0]->AsString();
-			}
-
-			Result.Add(Info);
-		}
-	}
+		    Result.Add(Info);
+	    }
+	);
 
 	return Result;
 }

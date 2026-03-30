@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Containers/Map.h"
+#include "HAL/CriticalSection.h"
 
 namespace Thespeon
 {
@@ -12,6 +13,8 @@ namespace Language
 /**
  * Runtime lookup table that manages both static (pre-loaded) and dynamic (runtime-added)
  * word-to-phoneme mappings. Checked before invoking the G2P neural model for faster resolution.
+ *
+ * Thread-safe: reads and writes to the dynamic table are protected by an internal FRWLock.
  */
 class RuntimeLookupTable
 {
@@ -48,6 +51,7 @@ class RuntimeLookupTable
   private:
 	TMap<FString, FString> StaticLookupTable;
 	TMap<FString, FString> DynamicLookupTable;
+	mutable FRWLock TableLock;
 };
 } // namespace Language
 } // namespace Thespeon

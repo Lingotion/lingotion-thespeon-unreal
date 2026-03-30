@@ -78,14 +78,30 @@ TArray<FString> FTextPreprocessor::ExtractWords(const FString& Text)
 	return Words;
 }
 
-FString FTextPreprocessor::CleanText(const FString& Input)
+FString FTextPreprocessor::TrimBasedOnPosition(const FString& Text, ETextPosition Position)
+{
+	switch (Position)
+	{
+		case ETextPosition::First:
+			return Text.TrimStart();
+		case ETextPosition::Last:
+			return Text.TrimEnd();
+		case ETextPosition::Only:
+			return Text.TrimStartAndEnd();
+		case ETextPosition::Middle:
+		default:
+			return Text; // No trimming
+	}
+}
+
+FString FTextPreprocessor::CleanText(const FString& Input, ETextPosition Position)
 {
 	if (Input.IsEmpty())
 	{
 		return Input;
 	}
 
-	FString Result = Input;
+	FString Result = TrimBasedOnPosition(Input, Position);
 
 	// Convert to lowercase
 	Result = Result.ToLower();

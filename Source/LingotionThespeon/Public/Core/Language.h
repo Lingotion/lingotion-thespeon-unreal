@@ -101,7 +101,7 @@ struct FLingotionLanguage
 	}
 
 	/**
-	 * @brief Checks whether this language is defined.
+	 * @brief Checks whether this language is undefined.
 	 *
 	 * @return true if the language is undefined.
 	 */

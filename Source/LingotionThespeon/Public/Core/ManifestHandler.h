@@ -243,10 +243,28 @@ class LINGOTIONTHESPEON_API UManifestHandler : public UEngineSubsystem
 	bool TryGetCharacterModules(TSharedPtr<FJsonObject>& OutCharacterModulesPtr) const;
 
 	/**
+	 * Iterates all valid character module entries, invoking Callback for each.
+	 *
+	 * Handles root validation and character_modules extraction before iterating.
+	 * Skips entries whose value is not a valid JSON object.
+	 *
+	 * @param Callback Invoked with the module ID and module JSON object for each valid entry.
+	 */
+	void IterateCharacterModules(TFunctionRef<void(const FString&, const TSharedPtr<FJsonObject>&)> Callback) const;
+
+	/**
 	 * Reads a version object from a JSON module definition.
 	 *
 	 * @param ModuleObj The JSON object containing version fields (major, minor, patch).
 	 * @return The parsed FVersion struct.
 	 */
 	Thespeon::Core::FVersion ReadVersionObject(const TSharedPtr<FJsonObject>& ModuleObj) const;
+
+	/**
+	 * Gets the front-end display string for a given module quality.
+	 *
+	 * @param QualityString The internal string representation of the quality.
+	 * @return The front-end display string.
+	 */
+	FString GetQuality(const FString& QualityString, const FString& ModuleID) const;
 };

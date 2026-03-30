@@ -6,6 +6,7 @@
 #include "Internationalization/Regex.h"
 #include "Core/ModelInput.h"
 #include "Core/Language.h"
+#include "Language/TextPosition.h"
 
 // Forward declarations
 class UThespeonInput;
@@ -32,9 +33,10 @@ class LINGOTIONTHESPEON_API FTextPreprocessor
 	 * Cleans the input text by normalizing apostrophes, converting to lowercase,
 	 * removing unwanted patterns, and normalizing whitespace.
 	 * @param Input The text to clean
+	 * @param Position The position of the text segment (First, Middle, Last, Only) for context-aware cleaning
 	 * @return The cleaned text
 	 */
-	static FString CleanText(const FString& Input);
+	static FString CleanText(const FString& Input, ETextPosition Position);
 
 	/**
 	 * Splits a segment into multiple segments when numbers are found.
@@ -86,4 +88,13 @@ class LINGOTIONTHESPEON_API FTextPreprocessor
 	 * @return The regex pattern for matching numbers (including ordinal suffixes where applicable)
 	 */
 	static const FRegexPattern& GetNumberPattern(const FString& Iso639_2);
+
+	/**
+	 * Trims the text based on its position in the input stream.
+	 *
+	 * @param Text The text to trim
+	 * @param Position The position of the text segment
+	 * @return The trimmed text
+	 */
+	static FString TrimBasedOnPosition(const FString& Text, ETextPosition Position);
 };

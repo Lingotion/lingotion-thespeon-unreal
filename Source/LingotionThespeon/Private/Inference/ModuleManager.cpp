@@ -14,7 +14,8 @@ void UModuleManager::Initialize(FSubsystemCollectionBase& Collection)
 
 void UModuleManager::Deinitialize()
 {
-	// your shutdown...
+	FWriteScopeLock WriteLock(ModulesLock);
+	Modules.Empty();
 	Super::Deinitialize();
 }
 
@@ -30,6 +31,7 @@ UModuleManager* UModuleManager::Get()
  */
 bool UModuleManager::TryDeregisterModule(FString ModuleID)
 {
+	FWriteScopeLock WriteLock(ModulesLock);
 	auto* ModulePtr = Modules.Find(ModuleID);
 	if (!ModulePtr)
 	{
@@ -46,6 +48,7 @@ bool UModuleManager::TryDeregisterModule(FString ModuleID)
 
 bool UModuleManager::IsRegistered(FString ModuleID)
 {
+	FReadScopeLock ReadLock(ModulesLock);
 	return Modules.Contains(ModuleID);
 }
 
@@ -72,6 +75,7 @@ TSet<FString> UModuleManager::GetWorkloadIDsToRemove(Thespeon::Core::Module* Mod
 	}
 	TSet<FString> OtherWorkloadIDs;
 
+	FReadScopeLock ReadLock(ModulesLock);
 	for (const auto& LoadedModule : Modules)
 	{
 		// skip modules that are the same, of different type, or not loaded on the backend in question
@@ -101,6 +105,7 @@ TSet<FString> UModuleManager::GetNonOverlappingModelLangModules(Thespeon::Charac
 	TSet<FString> moduleMd5s(langModuleIDs);
 	TSet<FString> otherMd5s;
 
+	FReadScopeLock ReadLock(ModulesLock);
 	for (const auto& LoadedModule : Modules)
 	{
 		if (LoadedModule.Value->ModuleID == Module->ModuleID || LoadedModule.Value->GetModuleType() != Module->GetModuleType())
@@ -109,7 +114,7 @@ TSet<FString> UModuleManager::GetNonOverlappingModelLangModules(Thespeon::Charac
 		}
 
 		TArray<FString> currentLangModuleIDs;
-		static_cast<Thespeon::Character::CharacterModule*>(LoadedModule.Value.Get())->LanguageModuleIDs.GenerateValueArray(currentLangModuleIDs);
+		StaticCastSharedPtr<Thespeon::Character::CharacterModule>(LoadedModule.Value)->LanguageModuleIDs.GenerateValueArray(currentLangModuleIDs);
 		otherMd5s.Append(currentLangModuleIDs);
 	}
 

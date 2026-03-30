@@ -348,6 +348,7 @@ bool Thespeon::Character::CharacterModule::IsIncludedIn(const TSet<FString>& Wor
 			    *FilePair.Value.FileName,
 			    *UEnum::GetValueAsString(BackendType)
 			);
+			return false;
 		}
 		if (FilePair.Key != TEXT("metagraph") && !WorkloadIDs.Contains(WorkloadID))
 		{

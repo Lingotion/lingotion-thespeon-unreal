@@ -1,39 +1,43 @@
 # The Thespeon Manual
 
 ## Table of Contents
-- [**Overview**](#overview)
-- [**The Thespeon Component**](#the-thespeon-component)
-  - [Adding the Component](#adding-the-component)
-  - [Synthesizing a Performance](#synthesizing-a-performance)
-  - [Preloading a Character](#preloading-a-character)
-  - [Cancelling a Synthesis](#cancelling-a-synthesis)
-  - [Checking Synthesis State](#checking-synthesis-state)
-  - [Resource Cleanup](#resource-cleanup)
-- [**Character Control**](#character-control)
-  - [Input Building Blocks](#input-building-blocks)
-  - [Mandatory Instructions](#mandatory-instructions)
-  - [Optional Instructions](#optional-instructions)
-  - [Fallback Handling](#fallback-handling)
-  - [Language Matching](#language-matching)
-  - [Custom Pronunciation (IPA)](#custom-pronunciation-ipa)
-  - [Validating Your Input](#validating-your-input)
-- [**Delegates and Events**](#delegates-and-events)
-  - [OnAudioReceived](#onaudioreceived)
-  - [OnAudioSampleRequestReceived](#onaudiosamplerequestreceived)
-  - [OnSynthesisComplete](#onsynthesiscomplete)
-  - [OnPreloadComplete](#onpreloadcomplete)
-  - [OnSynthesisFailed](#onsynthesisfailed)
-- [**Control Characters**](#control-characters)
-  - [Pause](#pause)
-  - [Audio Sample Request](#audio-sample-request)
-- [**Runtime Settings**](#runtime-settings)
-- [**Performance and Optimization**](#performance-and-optimization)
-  - [Module Type](#module-type)
-  - [Thread Priority](#thread-priority)
-  - [CPU Thread Count (ONNX Runtime)](#cpu-thread-count-onnx-runtime)
-  - [Backend Selection: CPU vs GPU](#backend-selection-cpu-vs-gpu)
-  - [Buffer Seconds](#buffer-seconds)
-- [**Logging and Diagnostics**](#logging-and-diagnostics)
+- [The Thespeon Manual](#the-thespeon-manual)
+  - [Table of Contents](#table-of-contents)
+  - [Overview](#overview)
+  - [The Thespeon Component](#the-thespeon-component)
+    - [Adding the Component](#adding-the-component)
+    - [Synthesizing a Performance](#synthesizing-a-performance)
+    - [Preloading a Character](#preloading-a-character)
+    - [Preloading a Character Group](#preloading-a-character-group)
+    - [Cancelling a Synthesis](#cancelling-a-synthesis)
+    - [Checking Synthesis State](#checking-synthesis-state)
+    - [Resource Cleanup](#resource-cleanup)
+  - [Character Control](#character-control)
+    - [Input Building Blocks](#input-building-blocks)
+    - [Mandatory Instructions](#mandatory-instructions)
+    - [Optional Instructions](#optional-instructions)
+    - [Fallback Handling](#fallback-handling)
+    - [Language Matching](#language-matching)
+    - [Custom Pronunciation (IPA)](#custom-pronunciation-ipa)
+    - [Validating Your Input](#validating-your-input)
+  - [Delegates and Events](#delegates-and-events)
+    - [OnAudioReceived](#onaudioreceived)
+    - [OnAudioSampleRequestReceived](#onaudiosamplerequestreceived)
+    - [OnSynthesisComplete](#onsynthesiscomplete)
+    - [OnPreloadComplete](#onpreloadcomplete)
+    - [OnPreloadGroupComplete](#onpreloadgroupcomplete)
+    - [OnSynthesisFailed](#onsynthesisfailed)
+  - [Control Characters](#control-characters)
+    - [Pause](#pause)
+    - [Audio Sample Request](#audio-sample-request)
+  - [Runtime Settings](#runtime-settings)
+  - [Performance and Optimization](#performance-and-optimization)
+    - [Module Type](#module-type)
+    - [Thread Priority](#thread-priority)
+    - [CPU Thread Count (ONNX Runtime)](#cpu-thread-count-onnx-runtime)
+    - [Backend Selection: CPU vs GPU](#backend-selection-cpu-vs-gpu)
+    - [Buffer Seconds](#buffer-seconds)
+  - [Logging and Diagnostics](#logging-and-diagnostics)
 
 ---
 
@@ -67,12 +71,12 @@ The call initiates a background thread to leave your game thread unblocked.
 
 If the requested character has not been preloaded, Thespeon will load it on demand before starting synthesis. This adds latency to the first call -- see [Preloading a Character](#preloading-a-character) for how to avoid this.
 
-> [!CAUTION]
-> Multiple parallel inferences and preloads are not supported yet. Instead, subsequent requests are queued with syntheses being prioritized. Attempting to run parallel operations by using several `UThespeonComponent` instances simultaneously will result in a crash.
+> [!NOTE]
+> Parallel synthesis across multiple `UThespeonComponent` instances is supported via workload pooling. Within a single component, subsequent synthesis requests are queued, with syntheses being prioritized over pending preloads.
 
 ### Preloading a Character
 
-While `Synthesize` will automatically load a character if needed, the loading process takes time and significantly affects real-time performance. To avoid this, you can preload characters ahead of time using `PreloadCharacter`. Provide the character name, [`EThespeonModuleType`](./API/EThespeonModuleType.md), and optionally an `FInferenceConfig` to specify whether to load to the CPU or GPU backend.
+While `Synthesize` will automatically load a character if needed, the loading process takes time and significantly affects real-time performance. To avoid this, you can preload characters ahead of time using `PreloadCharacter`. Parallel preloading is supported. Provide the character name, [`EThespeonModuleType`](./API/EThespeonModuleType.md), and optionally an `FInferenceConfig` to specify whether to load to the CPU or GPU backend.
 
 `PreloadCharacter` is non-blocking -- the request is added to a queue and processed asynchronously. The `OnPreloadComplete` delegate fires when the operation finishes. See the GUISample Level Blueprint for an example of how preloading is done in practice.
 
@@ -83,6 +87,17 @@ While `Synthesize` will automatically load a character if needed, the loading pr
 > The backend chosen during preloading determines the backend on which `Synthesize` runs, regardless of any `FInferenceConfig` provided later to `Synthesize`.
 
 The first synthesis for each character also has higher latency due to buffer initializations. Preloading with a mock synthesis beforehand can alleviate this -- the GUISample scene demonstrates this pattern.
+
+### Preloading a Character Group
+
+When you need to preload multiple characters at once, use `PreloadCharacterGroup` instead of calling `PreloadCharacter` in a loop. This method accepts an array of [`FPreloadEntry`](./API/FPreloadEntry.md) structs and a `PreloadGroupId` string. Each `FPreloadEntry` specifies a `CharacterName`, `ModuleType`, and optional `FInferenceConfig`.
+
+All preloads in the group are registered atomically before any thread starts, ensuring the [`OnPreloadGroupComplete`](#onpreloadgroupcomplete) delegate cannot fire prematurely regardless of how fast individual preloads finish. The delegate fires once when all entries in the group have completed, providing the `PreloadGroupId` and a `bAllSucceeded` boolean indicating whether every entry succeeded.
+
+Individual `OnPreloadComplete` delegates still fire for each entry in the group, so you can track per-character progress if needed.
+
+> [!TIP]
+> `PreloadCharacterGroup` is the preferred approach over calling `PreloadCharacter` in a loop with a shared group ID, because the atomic registration guarantees correct group completion tracking.
 
 ### Cancelling a Synthesis
 
@@ -191,6 +206,15 @@ Broadcast when a `PreloadCharacter` operation completes. Useful for signaling a 
 - `CharacterName` -- the name of the character that was preloaded
 - `ModuleType` -- the module type that was preloaded
 - `BackendType` -- the backend to which the character was loaded
+
+### OnPreloadGroupComplete
+
+Broadcast when all preloads in a `PreloadCharacterGroup` call have completed. The delegate provides:
+
+- `PreloadGroupId` -- the group ID string passed to `PreloadCharacterGroup`
+- `bAllSucceeded` -- `true` if every individual preload in the group succeeded, `false` if any failed
+
+This is useful for gating gameplay logic or UI state on the completion of an entire batch of preloads rather than tracking each one individually.
 
 ### OnSynthesisFailed
 

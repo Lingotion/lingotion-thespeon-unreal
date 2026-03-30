@@ -9,8 +9,7 @@
 #include "meta_graph.pb.h"
 #include "InferenceSession.h"
 #include "Core/ThespeonDataPacket.h"
-
-class UInferenceWorkloadManager;
+#include "SessionWorkloadCache.h"
 namespace Thespeon
 {
 namespace Character
@@ -37,6 +36,7 @@ class FMetaGraphRunner
 	FMetaGraphRunner(
 	    SessionTensorPool& InTensorPool,
 	    Thespeon::Character::CharacterModule* InCharacterModule,
+	    Thespeon::Inference::FSessionWorkloadCache* InWorkloadCache,
 	    const FInferenceConfig& InConfig,
 	    Thespeon::Inference::FPostPacketFn InCallback,
 	    Thespeon::Inference::FShouldStopFn InStopSignal
@@ -99,7 +99,7 @@ class FMetaGraphRunner
 	static bool ScalarLiteralToHostValue(const metaonnx::ScalarLiteral& Lit, FHostValue& Out);
 	static bool ResolveValueRef(const metaonnx::ValueRef& Ref, const SessionTensorPool& TensorPool, const FHostMap& Host, FHostValue& Out);
 
-	InferenceWorkload* ResolveWorkloadForNode(const metaonnx::Node& Node) const;
+	TSharedPtr<InferenceWorkload, ESPMode::ThreadSafe> ResolveWorkloadForNode(const metaonnx::Node& Node) const;
 
 	// Tensor creation helpers
 	static int64 NumElements(const TArray<int64>& Dims);
@@ -107,7 +107,7 @@ class FMetaGraphRunner
 
   private:
 	SessionTensorPool& TensorPool;
-	UInferenceWorkloadManager* InferenceWorkloadManager = nullptr;
+	FSessionWorkloadCache* WorkloadCache = nullptr;
 	Thespeon::Character::CharacterModule* CharacterModule = nullptr;
 	const FInferenceConfig& Config;
 	FPostPacketFn PostPacketCallback;

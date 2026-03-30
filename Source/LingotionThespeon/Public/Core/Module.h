@@ -136,7 +136,7 @@ struct FModuleFile
 	 * @param fileName The base file name.
 	 * @param extension The file extension.
 	 */
-	FModuleFile(FString fileName, FString extension) : FileName(fileName), FileExtension(extension) {}
+	FModuleFile(FString fileName, FString extension) : FileName(MoveTemp(fileName)), FileExtension(MoveTemp(extension)) {}
 
 	/**
 	 * @brief Returns the full file name including extension.
@@ -277,7 +277,7 @@ class Module
 	 * @param OutLoadedModels Array to populate with the loaded model data.
 	 * @return True if all models were loaded successfully, false otherwise.
 	 */
-	bool LoadModelsAsync(const TArray<FSoftObjectPath>& SoftPaths, TArray<TStrongObjectPtr<UNNEModelData>>& OutLoadedModels) const;
+	static bool LoadModelsAsync(const TArray<FSoftObjectPath>& SoftPaths, TArray<TStrongObjectPtr<UNNEModelData>>& OutLoadedModels);
 };
 
 /**

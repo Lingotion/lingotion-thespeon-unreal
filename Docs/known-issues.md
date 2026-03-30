@@ -1,6 +1,5 @@
 # Known Issues and Limitations  
 **These issues are known and are currently being addressed by the Lingotion development team. If you find any other issues, please create a new issue through the [GitHub repository](https://github.com/Lingotion/lingotion-thespeon-unreal/issues/new).**
-* Multiple parallel inferences and preloads are not supported yet. Instead subsequent requests are queued with syntheses being prioritized if called from the same ThespeonComponent. Attempting to run parallel operations by using several components simultaneously will result in a crash. 
 * The first synthesis has higher latency and performance impact than subsequent syntheses due to buffer initializations. It is advised to utilize `PreloadCharacter` to load the models into memory before synthesis if possible.
 * Very short syntheses - shorter than about 1/3 of a second - are not supported yet and will result in a crash.
 * Support for the control character Audio Sample Request currently only extends to a maximum of one per word. Having several of these in a single word will cause all of them except the last to be ignored.

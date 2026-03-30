@@ -40,7 +40,63 @@ template <typename T> bool ContainsZero(const void* RawData, SIZE_T SizeInBytes)
 
 Thespeon::Inference::InferenceWorkload::InferenceWorkload(const TStrongObjectPtr<UNNEModelData>& ModelData, EBackendType BackendType)
 {
+	Backend = BackendType;
 	SetModelinstance(ModelData, BackendType);
+}
+
+// NNE thread safety: IModelCPU::CreateModelInstanceCPU() / IModelGPU::CreateModelInstanceGPU()
+// are safe to call concurrently from background threads. Verified empirically:
+// TUNR-134 FPreloadSession dispatches parallel TaskGraph tasks that call RegisterModuleWorkload
+// (which creates instances via the same IModel) — no crashes observed in Phase 3 concurrent
+// preload tests (T4_MultiComponentConcurrentPreload, T6_PreloadThenImmediateSynthesis).
+// The underlying ONNX Runtime session creation is documented as thread-safe.
+TSharedPtr<Thespeon::Inference::InferenceWorkload, ESPMode::ThreadSafe> Thespeon::Inference::InferenceWorkload::CreateFromModel(
+    TSharedPtr<UE::NNE::IModelCPU> InModelCPU, TSharedPtr<UE::NNE::IModelGPU> InModelGPU, EBackendType InBackend
+)
+{
+	// Allocate via raw new since the default constructor is private
+	TSharedPtr<InferenceWorkload, ESPMode::ThreadSafe> Workload(new InferenceWorkload());
+	Workload->Backend = InBackend;
+	Workload->SourceModelCPU = InModelCPU;
+	Workload->SourceModelGPU = InModelGPU;
+
+	switch (InBackend)
+	{
+		case EBackendType::CPU:
+		case EBackendType::None:
+		{
+			if (!InModelCPU.IsValid())
+			{
+				LINGO_LOG_FUNC(EVerbosityLevel::Error, TEXT("No source CPU model provided"));
+				return nullptr;
+			}
+			TRACE_CPUPROFILER_EVENT_SCOPE_STR("CreateModelInstanceCPU");
+			Workload->ModelInstance = InModelCPU->CreateModelInstanceCPU();
+			break;
+		}
+		case EBackendType::GPU:
+		{
+			if (!InModelGPU.IsValid())
+			{
+				LINGO_LOG_FUNC(EVerbosityLevel::Error, TEXT("No source GPU model provided"));
+				return nullptr;
+			}
+			TRACE_CPUPROFILER_EVENT_SCOPE_STR("CreateModelInstanceGPU");
+			Workload->ModelInstance = InModelGPU->CreateModelInstanceGPU();
+			break;
+		}
+		default:
+			LINGO_LOG_FUNC(EVerbosityLevel::Error, TEXT("Unsupported backend type"));
+			return nullptr;
+	}
+
+	if (!Workload->ModelInstance.IsValid())
+	{
+		LINGO_LOG_FUNC(EVerbosityLevel::Error, TEXT("Failed to create model instance"));
+		return nullptr;
+	}
+
+	return Workload;
 }
 
 bool Thespeon::Inference::InferenceWorkload::SetCPU(const TStrongObjectPtr<UNNEModelData>& ModelData)
@@ -53,8 +109,8 @@ bool Thespeon::Inference::InferenceWorkload::SetCPU(const TStrongObjectPtr<UNNEM
 		return false;
 	}
 
-	TSharedPtr<UE::NNE::IModelCPU> Model = Runtime->CreateModelCPU(TObjectPtr<UNNEModelData>(ModelData.Get()));
-	if (!Model.IsValid())
+	SourceModelCPU = Runtime->CreateModelCPU(TObjectPtr<UNNEModelData>(ModelData.Get()));
+	if (!SourceModelCPU.IsValid())
 	{
 		LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to create model"));
 		return false;
@@ -62,7 +118,7 @@ bool Thespeon::Inference::InferenceWorkload::SetCPU(const TStrongObjectPtr<UNNEM
 
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE_STR("CreateModelInstanceCPU");
-		ModelInstance = Model->CreateModelInstanceCPU();
+		ModelInstance = SourceModelCPU->CreateModelInstanceCPU();
 	}
 
 	return true;
@@ -77,8 +133,8 @@ bool Thespeon::Inference::InferenceWorkload::SetGPU(const TStrongObjectPtr<UNNEM
 		LINGO_LOG(EVerbosityLevel::Error, TEXT("Cannot find runtime NNERuntimeORTDml, please enable the corresponding plugin"));
 		return false;
 	}
-	TSharedPtr<UE::NNE::IModelGPU> Model = Runtime->CreateModelGPU(TObjectPtr<UNNEModelData>(ModelData.Get()));
-	if (!Model.IsValid())
+	SourceModelGPU = Runtime->CreateModelGPU(TObjectPtr<UNNEModelData>(ModelData.Get()));
+	if (!SourceModelGPU.IsValid())
 	{
 		LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to create model"));
 		return false;
@@ -86,7 +142,7 @@ bool Thespeon::Inference::InferenceWorkload::SetGPU(const TStrongObjectPtr<UNNEM
 
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE_STR("CreateModelInstanceGPU");
-		ModelInstance = Model->CreateModelInstanceGPU();
+		ModelInstance = SourceModelGPU->CreateModelInstanceGPU();
 	}
 
 	return true;
@@ -130,17 +186,17 @@ void Thespeon::Inference::InferenceWorkload::SetModelinstance(const TStrongObjec
 	}
 }
 
-void Thespeon::Inference::InferenceWorkload::Infer(
+bool Thespeon::Inference::InferenceWorkload::Infer(
     SessionTensorPool& TensorPool, const TConstArrayView<UE::NNE::FTensorShape>& OutputTensorShapes, const FInferenceConfig& Config, FString debugName
 )
 {
 	TArray<UE::NNE::FTensorBindingCPU> InputBindings, OutputBindings;
 	TRACE_CPUPROFILER_EVENT_SCOPE_TEXT(*debugName);
 	// 1) Prepare input bindings
-	if (ModelInstance == nullptr || !ModelInstance.IsValid())
+	if (!ModelInstance.IsValid())
 	{
 		LINGO_LOG(EVerbosityLevel::Error, TEXT("ModelInstance is not valid in '%s'"), *debugName);
-		return;
+		return false;
 	}
 	TConstArrayView<UE::NNE::FTensorDesc> InputDescs = ModelInstance->GetInputTensorDescs();
 	InputBindings.SetNum(InputDescs.Num());
@@ -153,7 +209,7 @@ void Thespeon::Inference::InferenceWorkload::Infer(
 		if (!TensorPool.TryGetTensor(InputDescs[i].GetName(), Tensor))
 		{
 			LINGO_LOG(EVerbosityLevel::Error, TEXT("Input tensor '%s' has no data in '%s'"), *InputDescs[i].GetName(), *debugName);
-			return;
+			return false;
 		}
 
 		InputShapes.Add(Tensor->GetTensorShape());
@@ -183,6 +239,7 @@ void Thespeon::Inference::InferenceWorkload::Infer(
 	if (status == UE::NNE::IModelInstanceRunSync::ERunSyncStatus::Fail)
 	{
 		LINGO_LOG(EVerbosityLevel::Error, TEXT("Model run failed"));
+		return false;
 	}
 
 	// Debug during development only - checks that no output tensor is all zero
@@ -195,10 +252,16 @@ void Thespeon::Inference::InferenceWorkload::Infer(
 	{
 		TensorPool.SetTensor(OutputDescs[i].GetName(), MoveTemp(OutputModelData[i]));
 	}
+	return true;
 }
 
 TConstArrayView<UE::NNE::FTensorDesc> Thespeon::Inference::InferenceWorkload::GetOutputTensorDesc()
 {
+	if (!ModelInstance.IsValid())
+	{
+		LINGO_LOG(EVerbosityLevel::Error, TEXT("GetOutputTensorDesc called with invalid ModelInstance"));
+		return {};
+	}
 	return ModelInstance->GetOutputTensorDescs();
 }
 

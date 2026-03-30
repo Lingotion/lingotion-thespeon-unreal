@@ -37,7 +37,7 @@ void Thespeon::Inference::SessionTensorPool::SetTensor(const FString& Name, TUni
 void Thespeon::Inference::SessionTensorPool::SetTensor(const FString& Name, ModelIOData&& TensorData)
 {
 	// transfer ownership fully to the pool
-	TensorMap.Emplace(Name, MakeUnique<ModelIOData>(TensorData));
+	TensorMap.Emplace(Name, MakeUnique<ModelIOData>(MoveTemp(TensorData)));
 }
 
 bool Thespeon::Inference::SessionTensorPool::TryRenameTensor(const FString& SourceTensorName, const FString& TargetTensorName)

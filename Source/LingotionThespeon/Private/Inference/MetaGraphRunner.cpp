@@ -4,22 +4,22 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 
-#include "InferenceWorkloadManager.h"
 #include "Character/CharacterModule.h"
 #include "Utils/WavSaver.h"
 #include "SymExprParser.h"
-#include "Utils/SubsystemUtils.h"
 
 using namespace Thespeon::Inference;
 
 FMetaGraphRunner::FMetaGraphRunner(
     SessionTensorPool& InTensorPool,
     Thespeon::Character::CharacterModule* InCharacterModule,
+    Thespeon::Inference::FSessionWorkloadCache* InWorkloadCache,
     const FInferenceConfig& InConfig,
     Thespeon::Inference::FPostPacketFn InCallback,
     Thespeon::Inference::FShouldStopFn InStopSignal
 )
     : TensorPool(InTensorPool)
+    , WorkloadCache(InWorkloadCache)
     , CharacterModule(InCharacterModule)
     , Config(InConfig)
     , PostPacketCallback(MoveTemp(InCallback))
@@ -112,16 +112,16 @@ UE::NNE::FTensorShape FMetaGraphRunner::MakeShapeFromDims(const TArray<int64>& D
 	return UE::NNE::FTensorShape::Make(IntDims);
 }
 
-InferenceWorkload* FMetaGraphRunner::ResolveWorkloadForNode(const metaonnx::Node& Node) const
+TSharedPtr<InferenceWorkload, ESPMode::ThreadSafe> FMetaGraphRunner::ResolveWorkloadForNode(const metaonnx::Node& Node) const
 {
-	if (!InferenceWorkloadManager || !CharacterModule)
+	if (!WorkloadCache || !CharacterModule)
 	{
 		return nullptr;
 	}
 
 	const FString LogicalName = ToFString(Node.id());
 	auto InternalID = CharacterModule->GetInternalModelID(*LogicalName);
-	return InferenceWorkloadManager->GetWorkload(InternalID, Config.BackendType);
+	return WorkloadCache->GetWorkload(InternalID);
 }
 
 // Convert ScalarLiteral -> FHostValue.
@@ -702,7 +702,7 @@ bool FMetaGraphRunner::RunNode(
 		TensorPool.SetTensor(InputName, ModelIOData(*SrcTensor));
 	}
 
-	InferenceWorkload* Workload = ResolveWorkloadForNode(Node);
+	TSharedPtr<InferenceWorkload, ESPMode::ThreadSafe> Workload = ResolveWorkloadForNode(Node);
 	if (!Workload)
 	{
 		LINGO_LOG(
@@ -742,7 +742,12 @@ bool FMetaGraphRunner::RunNode(
 		OutputShapes.Add(UE::NNE::FTensorShape::Make(CurrentDims));
 	}
 
-	Workload->Infer(TensorPool, OutputShapes, Config, *ToFString(Node.id()));
+	bool bInferenceSuccess = Workload->Infer(TensorPool, OutputShapes, Config, *ToFString(Node.id()));
+	if (!bInferenceSuccess)
+	{
+		LINGO_LOG(EVerbosityLevel::Error, TEXT("Node '%s' failed to run. Aborting."), *ToFString(Node.id()));
+		return false;
+	}
 
 	for (int i = 0; i < Node.post_actions_size(); ++i)
 	{
@@ -818,15 +823,9 @@ bool FMetaGraphRunner::ExecuteGraphItem(
     FHostMap& Host
 )
 {
-	// Check cancel condition
+	// Check cancel condition — just bail out, Run() will post the appropriate packet
 	if (ExternStopSignal())
 	{
-		Thespeon::Core::FThespeonDataPacket PacketToSend(Thespeon::Core::SynthCallbackType::CB_ERROR);
-		Thespeon::Core::FPacketMetadataValue MetaVal;
-		MetaVal.Set<bool>(true);
-		PacketToSend.Metadata.Add(TEXT("was_cancelled"), MetaVal);
-
-		PostPacketCallback(PacketToSend);
 		return false;
 	}
 
@@ -902,7 +901,6 @@ bool FMetaGraphRunner::ExecuteGraphItem(
 // Each graph item can be a model node, a host action, a loop, or a conditional branch.
 bool FMetaGraphRunner::Run(const metaonnx::MetaGraph& Graph, TArray<float>& OutSamples)
 {
-	InferenceWorkloadManager = FLingotionThespeonSubsystemUtils::GetInferenceWorkloadManager();
 
 	FHostMap Host;
 

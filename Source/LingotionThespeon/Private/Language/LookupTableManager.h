@@ -6,6 +6,7 @@
 #include "Containers/Map.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "RuntimeLookupTable.h"
+#include "HAL/CriticalSection.h"
 #include "LookupTableManager.generated.h"
 
 namespace Thespeon
@@ -46,19 +47,19 @@ class ULookupTableManager : public UGameInstanceSubsystem
 	/**
 	 * Retrieves a registered lookup table by its MD5 identifier.
 	 * @param MD5 The MD5 identifier of the lookup table.
-	 * @return The RuntimeLookupTable associated with the MD5 identifier, or nullptr if not found.
+	 * @return Shared pointer to the RuntimeLookupTable, or nullptr if not found.
 	 */
-	Thespeon::Language::RuntimeLookupTable* GetLookupTable(const FString& MD5);
+	TSharedPtr<Thespeon::Language::RuntimeLookupTable, ESPMode::ThreadSafe> GetLookupTable(const FString& MD5);
 
 	/** Clears all registered lookup tables for garbage collection. */
 	void DisposeAndClear();
 
   private:
-	inline static TWeakObjectPtr<ULookupTableManager> CachedInstance = nullptr;
-
 	/** Map of MD5 identifiers to runtime lookup tables. */
-	TMap<FString, TUniquePtr<Thespeon::Language::RuntimeLookupTable>> AvailableLookupTables;
+	TMap<FString, TSharedPtr<Thespeon::Language::RuntimeLookupTable, ESPMode::ThreadSafe>> AvailableLookupTables;
 
 	/** Checks if a lookup table with the given MD5 is already registered. */
 	bool IsRegistered(const FString& MD5) const;
+
+	mutable FRWLock LookupTablesLock;
 };

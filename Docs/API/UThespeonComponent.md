@@ -20,6 +20,7 @@ void Synthesize(FLingotionModelInput Input, FString SessionId = TEXT(""), FInfer
 
 ### `PreloadCharacter`
 Attempts to load the files for a specific character and module type into memory.
+Fires OnPreloadComplete when done. For grouped preloads use PreloadCharacterGroup.
 
 **Parameters:**
 - `CharacterName`: The name of the character.
@@ -28,6 +29,20 @@ Attempts to load the files for a specific character and module type into memory.
 
 ```cpp
 void PreloadCharacter(FString CharacterName, EThespeonModuleType ModuleType, FInferenceConfig InferenceConfig = FInferenceConfig());
+```
+
+### `PreloadCharacterGroup`
+Preloads all entries in a single atomic group.
+All counts are registered before any thread starts, so OnPreloadGroupComplete
+cannot fire prematurely regardless of how fast individual preloads complete.
+Prefer this over calling PreloadCharacter in a loop with a shared group ID.
+
+**Parameters:**
+- `Characters`: The list of characters and module types to preload.
+- `PreloadGroupId`: Identifier for the group. OnPreloadGroupComplete fires once when all are done.
+
+```cpp
+void PreloadCharacterGroup(TArray<FPreloadEntry> Characters, FString PreloadGroupId);
 ```
 
 ### `TryUnloadCharacter`
@@ -96,7 +111,7 @@ FOnSynthesisComplete OnSynthesisComplete;
 ```
 
 ### `OnPreloadComplete`
-Called when preload is complete.
+Called when an individual preload is complete.
 
 **Parameters:**
 - `PreloadSuccess`: True if preload succeeded. False otherwise.
@@ -108,6 +123,17 @@ Called when preload is complete.
 FOnPreloadComplete OnPreloadComplete;
 ```
 
+### `OnPreloadGroupComplete`
+Called when all preloads in a group are complete.
+
+**Parameters:**
+- `PreloadGroupId`: The group ID passed to PreloadCharacter calls.
+- `bAllSucceeded`: True if every preload in the group succeeded.
+
+```cpp
+FOnPreloadGroupComplete OnPreloadGroupComplete;
+```
+
 ### `OnSynthesisFailed`
 Called when synthesis has failed.
 
@@ -116,26 +142,4 @@ Called when synthesis has failed.
 
 ```cpp
 FOnSynthesisFailed OnSynthesisFailed;
-```
-
-## Delegates
-
-```cpp
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnAudioReceived, FString, SessionID, const TArray<float>&, SynthesisData);
-```
-
-```cpp
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnAudioSampleRequestReceived, FString, SessionID, const TArray<int64>&, TriggerAudioSamples);
-```
-
-```cpp
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnSynthesisComplete, FString, SessionID);
-```
-
-```cpp
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams( FOnPreloadComplete, bool, PreloadSuccess, FString, CharacterName, EThespeonModuleType, ModuleType, EBackendType, BackendType );
-```
-
-```cpp
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnSynthesisFailed, FString, SessionID);
 ```

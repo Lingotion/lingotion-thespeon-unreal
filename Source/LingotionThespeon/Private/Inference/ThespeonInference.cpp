@@ -10,11 +10,12 @@
 #include "Core/IO/RuntimeFileLoader.h"
 #include "InferenceWorkload.h"
 #include "InferenceWorkloadManager.h"
+#include "PreloadSession.h"
 #include "Language/TextPreprocessor.h"
 #include <fstream>
 #include "meta_graph.pb.h"
 #include "MetaGraphRunner.h"
-#include "Utils/SubsystemUtils.h"
+#include "SessionWorkloadCache.h"
 
 // Loads a protobuf-serialized MetaGraph from disk. Used to load the character's inference graph definition.
 bool LoadModelFromDisk(const FString& Path, metaonnx::MetaGraph& OutGraph)
@@ -39,10 +40,17 @@ bool LoadModelFromDisk(const FString& Path, metaonnx::MetaGraph& OutGraph)
 
 void Thespeon::Inference::ThespeonInference::PostErrorPacket()
 {
+	TWeakPtr<std::atomic<bool>> WeakAlive(AliveToken);
 	AsyncTask(
 	    ENamedThreads::GameThread,
-	    [this]()
+	    [this, WeakAlive]()
 	    {
+		    TSharedPtr<std::atomic<bool>> StrongAlive = WeakAlive.Pin();
+		    if (!StrongAlive || !StrongAlive->load())
+		    {
+			    return;
+		    }
+
 		    Thespeon::Core::FThespeonDataPacket PacketToSend(Thespeon::Core::SynthCallbackType::CB_ERROR);
 
 		    if (OnDataSynthesized.IsBound())
@@ -55,10 +63,17 @@ void Thespeon::Inference::ThespeonInference::PostErrorPacket()
 
 void Thespeon::Inference::ThespeonInference::PostCancelledPacket()
 {
+	TWeakPtr<std::atomic<bool>> WeakAlive(AliveToken);
 	AsyncTask(
 	    ENamedThreads::GameThread,
-	    [this]()
+	    [this, WeakAlive]()
 	    {
+		    TSharedPtr<std::atomic<bool>> StrongAlive = WeakAlive.Pin();
+		    if (!StrongAlive || !StrongAlive->load())
+		    {
+			    return;
+		    }
+
 		    Thespeon::Core::FThespeonDataPacket PacketToSend(Thespeon::Core::SynthCallbackType::CB_ERROR);
 		    // We should investigate some helper functions for this
 		    Thespeon::Core::FPacketMetadataValue MetaVal;
@@ -95,7 +110,7 @@ bool Thespeon::Inference::ThespeonInference::PhonemizeBatch(
     const TArray<FString>& Words,
     Thespeon::Language::LanguageModule* LangModule,
     Thespeon::Language::RuntimeLookupTable* LookupTable,
-    UInferenceWorkloadManager* InferenceWorkloadManager,
+    Thespeon::Inference::FSessionWorkloadCache* WorkloadCache,
     const FInferenceConfig& Config
 )
 {
@@ -116,6 +131,10 @@ bool Thespeon::Inference::ThespeonInference::PhonemizeBatch(
 		LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("No words to phonemize"));
 		return false;
 	}
+	LINGO_LOG_FUNC(EVerbosityLevel::Info, TEXT("Phonemizing batch of %d words"), BatchSize);
+
+	const int32 StartToken = 1;
+	const int32 EndToken = 2;
 
 	// Encode all words to grapheme tokens
 	TArray<TArray<int64>> BatchGraphemeTokens;
@@ -127,8 +146,8 @@ bool Thespeon::Inference::ThespeonInference::PhonemizeBatch(
 		TArray<int64> GraphemeTokens = LangModule->EncodeGraphemes(Word);
 
 		// Add SOS and EOS tokens
-		GraphemeTokens.Insert(1, 0); // SOS token from grapheme vocab
-		GraphemeTokens.Add(2);       // EOS token from grapheme vocab
+		GraphemeTokens.Insert(StartToken, 0);
+		GraphemeTokens.Add(EndToken);
 
 		MaxSrcLength = FMath::Max(MaxSrcLength, GraphemeTokens.Num());
 		BatchGraphemeTokens.Add(MoveTemp(GraphemeTokens));
@@ -139,18 +158,14 @@ bool Thespeon::Inference::ThespeonInference::PhonemizeBatch(
 	FlatGraphemeTokens.Reserve(BatchSize * MaxSrcLength);
 	for (TArray<int64>& Tokens : BatchGraphemeTokens)
 	{
-		while (Tokens.Num() < MaxSrcLength)
-		{
-			Tokens.Add(0); // Pad with 0
-		}
+		Tokens.SetNumZeroed(MaxSrcLength);
 		FlatGraphemeTokens.Append(Tokens);
 	}
 
-	const int32 StartToken = 1;        // SOS token from phoneme vocab
-	const int32 EndToken = 2;          // EOS token from phoneme vocab
 	const int32 MaxPhonemeLength = 50; // Maximum autoregressive iterations
 
-	auto* PhonemizerWorkload = InferenceWorkloadManager->GetWorkload(LangModule->GetInternalModelID(TEXT("phonemizer")), InputConfig.BackendType);
+	TSharedPtr<InferenceWorkload, ESPMode::ThreadSafe> PhonemizerWorkload =
+	    WorkloadCache->GetWorkload(LangModule->GetInternalModelID(TEXT("phonemizer")));
 	if (!PhonemizerWorkload)
 	{
 		LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to get phonemizer workload"));
@@ -161,36 +176,29 @@ bool Thespeon::Inference::ThespeonInference::PhonemizeBatch(
 	TArray<int64> CurrentTgt;
 	TArray<int64> CurrentMask;
 	TArray<int64> FinishedIndices;
-	TArray<TArray<int64>> UnknownPhonemeTokens;
 	CurrentTgt.Init(StartToken, BatchSize); // [B]
 	CurrentMask.Init(1, BatchSize);         // [B]
 	FinishedIndices.Init(0, BatchSize);     // [B] - all words still active
-
-	UnknownPhonemeTokens.SetNum(BatchSize);
+	int32 CurrentTgtLength = CurrentTgt.Num() / BatchSize;
 
 	LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Starting phonemization with %d words, max src length %d"), BatchSize, MaxSrcLength);
+	TArray<FString> PhonemizerInputNames = {TEXT("src"), TEXT("tgt"), TEXT("mask_tensor"), TEXT("finished_indices")};
+	TArray<UE::NNE::FTensorShape> PhonemizerInputShapes = {
+	    UE::NNE::FTensorShape::Make({static_cast<uint32>(BatchSize), static_cast<uint32>(MaxSrcLength)}),
+	    UE::NNE::FTensorShape::Make({static_cast<uint32>(BatchSize), static_cast<uint32>(CurrentTgtLength)}),
+	    UE::NNE::FTensorShape::Make({static_cast<uint32>(BatchSize), static_cast<uint32>(CurrentTgtLength)}),
+	    UE::NNE::FTensorShape::Make({static_cast<uint32>(BatchSize)})
+	};
 
+	// Set input tensors in pool
+	TensorPool.SetTensor(PhonemizerInputNames[0], ModelIOData::MakeFromArray<int64>(PhonemizerInputShapes[0], FlatGraphemeTokens));
+	TensorPool.SetTensor(PhonemizerInputNames[1], ModelIOData::MakeFromArray<int64>(PhonemizerInputShapes[1], CurrentTgt));
+	TensorPool.SetTensor(PhonemizerInputNames[2], ModelIOData::MakeFromArray<int64>(PhonemizerInputShapes[2], CurrentMask));
+	TensorPool.SetTensor(PhonemizerInputNames[3], ModelIOData::MakeFromArray<int64>(PhonemizerInputShapes[3], FinishedIndices));
 	// Autoregressive loop: iteratively predicts the next phoneme token for each word in the batch.
 	// Continues until all words have produced an EOS token or MaxPhonemeLength is reached.
 	for (int32 Step = 0; Step < MaxPhonemeLength; ++Step)
 	{
-		const int32 CurrentTgtLength = CurrentTgt.Num() / BatchSize;
-
-		// Prepare input tensors for this step
-		TArray<FString> PhonemizerInputNames = {TEXT("src"), TEXT("tgt"), TEXT("mask_tensor"), TEXT("finished_indices")};
-		TArray<UE::NNE::FTensorShape> PhonemizerInputShapes = {
-		    UE::NNE::FTensorShape::Make({static_cast<uint32>(BatchSize), static_cast<uint32>(MaxSrcLength)}),
-		    UE::NNE::FTensorShape::Make({static_cast<uint32>(BatchSize), static_cast<uint32>(CurrentTgtLength)}),
-		    UE::NNE::FTensorShape::Make({static_cast<uint32>(BatchSize), static_cast<uint32>(CurrentTgtLength)}),
-		    UE::NNE::FTensorShape::Make({static_cast<uint32>(BatchSize)})
-		};
-
-		// Set input tensors in pool
-		TensorPool.SetTensor(PhonemizerInputNames[0], ModelIOData::MakeFromArray<int64>(PhonemizerInputShapes[0], FlatGraphemeTokens));
-		TensorPool.SetTensor(PhonemizerInputNames[1], ModelIOData::MakeFromArray<int64>(PhonemizerInputShapes[1], CurrentTgt));
-		TensorPool.SetTensor(PhonemizerInputNames[2], ModelIOData::MakeFromArray<int64>(PhonemizerInputShapes[2], CurrentMask));
-		TensorPool.SetTensor(PhonemizerInputNames[3], ModelIOData::MakeFromArray<int64>(PhonemizerInputShapes[3], FinishedIndices));
-
 		// Prepare output shapes - phonemizer outputs: new_tgt, new_mask, new_finished_indices, num_finished, next_word
 		TArray<UE::NNE::FTensorShape> PhonemizerOutputShapes = {
 		    UE::NNE::FTensorShape::Make({static_cast<uint32>(BatchSize), static_cast<uint32>(CurrentTgtLength + 1)}), // new_tgt
@@ -201,38 +209,24 @@ bool Thespeon::Inference::ThespeonInference::PhonemizeBatch(
 		};
 
 		// Run inference
-		PhonemizerWorkload->Infer(TensorPool, PhonemizerOutputShapes, Config, TEXT("Phonemizer"));
+		bool bPhonemizeSucceeded = PhonemizerWorkload->Infer(TensorPool, PhonemizerOutputShapes, Config, TEXT("Phonemizer"));
+		if (!bPhonemizeSucceeded)
+		{
+			LINGO_LOG(EVerbosityLevel::Error, TEXT("Phonemizer iteration failed to run, aborting."));
+			return false;
+		}
 
+		if (!TensorPool.TryRenameTensor(TEXT("new_tgt"), TEXT("tgt")) || !TensorPool.TryRenameTensor(TEXT("new_mask"), TEXT("mask_tensor")) ||
+		    !TensorPool.TryRenameTensor(TEXT("new_finished_indices"), TEXT("finished_indices")))
+		{
+			LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to rename phonemizer output tensors for next iteration"));
+			return false;
+		}
 		// Get output tensors
-		ModelIOData* NewTgtTensor = nullptr;
-		ModelIOData* NewMaskTensor = nullptr;
-		ModelIOData* NewFinishedIndicesTensor = nullptr;
 		ModelIOData* NumFinishedTensor = nullptr;
-		ModelIOData* NextWordTensor = nullptr;
-
-		if (!TensorPool.TryGetTensor(TEXT("new_tgt"), NewTgtTensor))
-		{
-			LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to get phonemizer new_tgt tensor"));
-			return false;
-		}
-		if (!TensorPool.TryGetTensor(TEXT("new_mask"), NewMaskTensor))
-		{
-			LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to get phonemizer new_mask tensor"));
-			return false;
-		}
-		if (!TensorPool.TryGetTensor(TEXT("new_finished_indices"), NewFinishedIndicesTensor))
-		{
-			LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to get phonemizer new_finished_indices tensor"));
-			return false;
-		}
 		if (!TensorPool.TryGetTensor(TEXT("num_finished"), NumFinishedTensor))
 		{
 			LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to get phonemizer num_finished tensor"));
-			return false;
-		}
-		if (!TensorPool.TryGetTensor(TEXT("next_word"), NextWordTensor))
-		{
-			LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to get phonemizer next_word tensor"));
 			return false;
 		}
 
@@ -245,34 +239,70 @@ bool Thespeon::Inference::ThespeonInference::PhonemizeBatch(
 			break;
 		}
 
-		// Extract batch outputs
-		TArray<int64> NextTokens = NextWordTensor->GetDataAsArray<int64>(); // [B]
-
-		// Add tokens to each word's phoneme sequence (skip SOS/EOS, exclude finished words)
-		for (int32 b = 0; b < BatchSize; ++b)
-		{
-			if (FinishedIndices[b] == 0) // Word not finished
-			{
-				int64 Token = NextTokens[b];
-				if (Token != StartToken && Token != EndToken)
-				{
-					UnknownPhonemeTokens[b].Add(Token);
-				}
-			}
-		}
-
 		// Update state for next iteration
-		CurrentTgt = NewTgtTensor->GetDataAsArray<int64>();
-		CurrentMask = NewMaskTensor->GetDataAsArray<int64>();
-		FinishedIndices = NewFinishedIndicesTensor->GetDataAsArray<int64>();
+		CurrentTgtLength++;
 	}
 
-	// Update dynamic lookup table with newly phonemized words
-	for (int32 i = 0; i < BatchSize; ++i)
+	// Extract final tensors after autoregressive loop
+	ModelIOData* FinalTgtTensor = nullptr;
+	if (!TensorPool.TryGetTensor(TEXT("tgt"), FinalTgtTensor))
 	{
-		FString PhonemeString = LangModule->DecodePhonemes(UnknownPhonemeTokens[i]);
-		LookupTable->AddOrUpdateDynamicEntry(Words[i], PhonemeString);
-		LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Cached '%s' -> '%s' to dynamic lookup"), *Words[i], *PhonemeString);
+		LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to get final tgt tensor"));
+		return false;
+	}
+	TArray<int64> PhonemeIndices = FinalTgtTensor->GetDataAsArray<int64>();
+
+	ModelIOData* FinishedIndicesTensor = nullptr;
+	if (!TensorPool.TryGetTensor(TEXT("finished_indices"), FinishedIndicesTensor))
+	{
+		LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to get final finished_indices tensor"));
+		return false;
+	}
+	TArray<int64> FinalFinishedIndices = FinishedIndicesTensor->GetDataAsArray<int64>();
+
+	int32 Stride = PhonemeIndices.Num() / BatchSize;
+	// Update dynamic lookup table with newly phonemized words
+	for (int32 j = 0; j < BatchSize; ++j)
+	{
+		if (FinalFinishedIndices[j] <= 0)
+		{
+			LINGO_LOG(EVerbosityLevel::Warning, TEXT("Phonemizer did not produce result for word '%s'. Using word as-is."), *Words[j]);
+			// Add the word itself as fallback to prevent downstream errors
+			LookupTable->AddOrUpdateDynamicEntry(Words[j], Words[j]);
+			continue;
+		}
+
+		int32 Start = j * Stride;
+		int32 End = Start + static_cast<int32>(FinalFinishedIndices[j]);
+
+		// Bounds check to prevent invalid range access
+		if (End <= Start + 1 || End > Start + Stride)
+		{
+			LINGO_LOG(
+			    EVerbosityLevel::Warning,
+			    TEXT("Word was phonemized but with incorrect range for '%s' (start=%d, end=%d, stride=%d, length=%d). Using word as-is."),
+			    *Words[j],
+			    Start,
+			    End,
+			    Stride,
+			    PhonemeIndices.Num()
+			);
+			// Add the word itself as fallback to prevent downstream errors
+			LookupTable->AddOrUpdateDynamicEntry(Words[j], Words[j]);
+			continue;
+		}
+
+		// Extract phoneme tokens for this word (skip SOS token at start+1, go to end)
+		TArray<int64> WordPhonemeTokens;
+		WordPhonemeTokens.Reserve(End - Start - 1);
+		for (int32 k = Start + 1; k < End; ++k)
+		{
+			WordPhonemeTokens.Add(PhonemeIndices[k]);
+		}
+
+		FString PhonemeString = LangModule->DecodePhonemes(WordPhonemeTokens);
+		LookupTable->AddOrUpdateDynamicEntry(Words[j], PhonemeString);
+		LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Cached '%s' -> '%s' to dynamic lookup"), *Words[j], *PhonemeString);
 	}
 	return true;
 }
@@ -389,24 +419,31 @@ TArray<FString> Thespeon::Inference::ThespeonInference::GetUnknownWords(
 	return OutUnknownWords;
 }
 
-// Main inference pipeline. Runs on a background thread (FRunnable::Run).
-// Pipeline: preload models -> validate input -> collect unknown words across all segments ->
-// batch-phonemize unknowns per language -> encode all segments to encoder tokens ->
-// build input tensors -> load and execute the MetaGraph (which handles encoder/decoder/vocoder).
-// Cooperative cancellation is checked at key points via ShouldStop().
-uint32 Thespeon::Inference::ThespeonInference::Run()
+bool Thespeon::Inference::ThespeonInference::ExecuteInference()
 {
-	// Early exit if stop was requested before we even started
+	// Early exit if stop was requested before we even started.
+	// Return true so Run() routes to PostCancelledPacket(), not PostErrorPacket().
 	if (ShouldStop())
 	{
 		LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Stop requested before execution started for session: %s"), *SessionID);
-		PostCancelledPacket();
-		return false;
+		return true;
 	}
 
 	// Preload character to ensure models are loaded
 	const EThespeonModuleType EffectiveModuleType = Input.ModuleType != EThespeonModuleType::None ? Input.ModuleType : InputConfig.ModuleType;
-	if (!TryPreloadCharacter(Input.CharacterName, EffectiveModuleType, InputConfig.BackendType))
+	Thespeon::Inference::FPreloadSession preload = Thespeon::Inference::FPreloadSession(
+	    Input.CharacterName,
+	    EffectiveModuleType,
+	    InputConfig.BackendType,
+	    InferenceWorkloadManager,
+	    ModuleManager,
+	    LookupTableManager,
+	    ManifestHandler,
+	    nullptr
+	);
+	preload.Init();
+	preload.Run();
+	if (!preload.WasSuccessful())
 	{
 		LINGO_LOG(
 		    EVerbosityLevel::Error,
@@ -414,76 +451,51 @@ uint32 Thespeon::Inference::ThespeonInference::Run()
 		    *Input.CharacterName,
 		    *UEnum::GetValueAsString(Input.ModuleType)
 		);
-		PostErrorPacket();
 		return false;
 	}
 	if (!Input.ValidateAndPopulate(InputConfig.ModuleType, InputConfig.FallbackLanguage, InputConfig.FallbackEmotion))
 	{
 		LINGO_LOG(EVerbosityLevel::Error, TEXT("Input validation failed. See earlier logs for details."));
-		PostErrorPacket();
 		return false;
 	}
 	LINGO_LOG_FUNC(
 	    EVerbosityLevel::Debug, TEXT("ThespeonInference.Run called with SessionID: %s and validated input:\n%s"), *SessionID, *Input.ToJson()
 	);
 
-	// Check for stop after preloading (which can take time)
+	// Check for stop after preloading (which can take time).
+	// Return true so Run() routes to PostCancelledPacket(), not PostErrorPacket().
 	if (ShouldStop())
 	{
 		LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Stop requested after preload for session: %s"), *SessionID);
-		PostCancelledPacket();
+		return true;
+	}
+
+	// Validate subsystem pointers (captured on game thread at construction)
+	if (!ManifestHandler || !ModuleManager || !InferenceWorkloadManager || !LookupTableManager)
+	{
+		LINGO_LOG(EVerbosityLevel::Error, TEXT("One or more subsystem pointers are null. Session was not properly constructed."));
 		return false;
 	}
 
-	auto* Manifest = UManifestHandler::Get();
-	if (!Manifest)
-	{
-		LINGO_LOG(EVerbosityLevel::Error, TEXT("ManifestHandler instance is null"));
-		PostErrorPacket();
-		return false;
-	}
-	Thespeon::Core::FModuleEntry Entry = Manifest->GetCharacterModuleEntry(Input.CharacterName, Input.ModuleType);
+	// Session-scoped workload cache: acquires exclusive workload instances from the pool on first
+	// access per model, caches them for the session duration, and releases all back to the pool
+	// when this scope exits (RAII). This ensures each concurrent session gets its own ModelInstance.
+	Thespeon::Inference::FSessionWorkloadCache WorkloadCache(InferenceWorkloadManager, InputConfig.BackendType);
 
-	auto* ModuleManager = UModuleManager::Get();
-	if (!ModuleManager)
-	{
-		LINGO_LOG(EVerbosityLevel::Error, TEXT("ModuleManager instance is null"));
-		PostErrorPacket();
-		return false;
-	}
-
-	UInferenceWorkloadManager* InferenceWorkloadManager = nullptr;
-	ULookupTableManager* LookupTableManager = nullptr;
-	if (!FLingotionThespeonSubsystemUtils::GetSubsystems(InferenceWorkloadManager, LookupTableManager))
-	{
-		LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to get subsystems from GameInstance."));
-		PostErrorPacket();
-		return false;
-	}
-
-	if (!InferenceWorkloadManager)
-	{
-		LINGO_LOG(EVerbosityLevel::Error, TEXT("InferenceWorkloadManager subsystem not found in GameInstance."));
-		PostErrorPacket();
-		return false;
-	}
-	if (!LookupTableManager)
-	{
-		LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("LookupTableManager subsystem not found in GameInstance."));
-		PostErrorPacket();
-		return false;
-	}
+	Thespeon::Core::FModuleEntry Entry = ManifestHandler->GetCharacterModuleEntry(Input.CharacterName, Input.ModuleType);
 
 	using namespace Thespeon::Inference;
 
-	Thespeon::Character::CharacterModule* CharacterModule = ModuleManager->GetModule<Thespeon::Character::CharacterModule>(Entry);
+	// TSharedPtr keeps module alive for this scope; raw pointer used for downstream API compatibility
+	TSharedPtr<Thespeon::Character::CharacterModule, ESPMode::ThreadSafe> CharacterModulePtr =
+	    ModuleManager->GetModule<Thespeon::Character::CharacterModule>(Entry);
 
-	if (!CharacterModule)
+	if (!CharacterModulePtr)
 	{
 		LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to get CharacterModule for character: %s"), *Input.CharacterName);
-		PostErrorPacket();
 		return false;
 	}
+	Thespeon::Character::CharacterModule* CharacterModule = CharacterModulePtr.Get();
 	LINGO_LOG_FUNC(
 	    EVerbosityLevel::Debug,
 	    TEXT("Got CharacterModule: %s, %s, %s"),
@@ -498,8 +510,8 @@ uint32 Thespeon::Inference::ThespeonInference::Run()
 	EEmotion lastEmotion = EEmotion::None;
 	int64 lastLanguageKey = -1;
 	TMap<FString, TArray<FString>> UnknownWordsByISO;
-	TMap<FString, Thespeon::Language::LanguageModule*> LanguageModulesCache;
-	TMap<FString, Thespeon::Language::RuntimeLookupTable*> LookupTablesCache;
+	TMap<FString, TSharedPtr<Thespeon::Language::LanguageModule, ESPMode::ThreadSafe>> LanguageModules;
+	TMap<FString, TSharedPtr<Thespeon::Language::RuntimeLookupTable, ESPMode::ThreadSafe>> LookupTables;
 	for (const FLingotionInputSegment& Segment : Input.Segments)
 	{
 		if (Segment.bIsCustomPronounced)
@@ -510,49 +522,48 @@ uint32 Thespeon::Inference::ThespeonInference::Run()
 		FString TargetISO639_2 = Segment.Language.ISO639_2;
 		LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Processing segment with target language: %s"), *TargetISO639_2);
 		Thespeon::Language::LanguageModule* LangModule = nullptr;
-		if (!LanguageModulesCache.Contains(TargetISO639_2)) // Cache LM per language
+		if (!LanguageModules.Contains(TargetISO639_2)) // Cache LM per language
 		{
 			LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("LanguageModule for ISO %s not in cache, loading..."), *TargetISO639_2);
 			FString* LangModuleID = CharacterModule->LanguageModuleIDs.Find(TargetISO639_2);
 			if (!LangModuleID)
 			{
 				LINGO_LOG(EVerbosityLevel::Error, TEXT("Character module has no language: %s"), *TargetISO639_2);
-				PostErrorPacket();
 				return false;
 			}
-			Thespeon::Core::FModuleEntry LangEntry = Manifest->GetLanguageModuleEntry(*LangModuleID);
-			LangModule = ModuleManager->GetModule<Thespeon::Language::LanguageModule>(LangEntry);
-			if (!LangModule)
+			Thespeon::Core::FModuleEntry LangEntry = ManifestHandler->GetLanguageModuleEntry(*LangModuleID);
+			TSharedPtr<Thespeon::Language::LanguageModule, ESPMode::ThreadSafe> LangModulePtr =
+			    ModuleManager->GetModule<Thespeon::Language::LanguageModule>(LangEntry);
+			if (!LangModulePtr)
 			{
 				LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to get LanguageModule"));
-				PostErrorPacket();
 				return false;
 			}
 			LINGO_LOG_FUNC(
 			    EVerbosityLevel::Debug,
 			    TEXT("Got LanguageModule: %s, %s, %s"),
-			    *(LangModule->ModuleID),
-			    *(LangModule->JSONPath),
-			    *(LangModule->Version.ToString())
+			    *(LangModulePtr->ModuleID),
+			    *(LangModulePtr->JSONPath),
+			    *(LangModulePtr->Version.ToString())
 			);
-			LanguageModulesCache.Add(TargetISO639_2, LangModule);
+			LanguageModules.Add(TargetISO639_2, LangModulePtr);
 		}
 
-		LangModule = LanguageModulesCache[TargetISO639_2];
-		if (!LookupTablesCache.Contains(TargetISO639_2)) // Cache LM per language
+		LangModule = LanguageModules[TargetISO639_2].Get();
+		if (!LookupTables.Contains(TargetISO639_2)) // Cache LT per language
 		{
 			FString LookupTableMD5 = LangModule->GetLookupTableID();
-			Thespeon::Language::RuntimeLookupTable* LookupTable = LookupTableManager->GetLookupTable(LookupTableMD5);
-			if (!LookupTable)
+			TSharedPtr<Thespeon::Language::RuntimeLookupTable, ESPMode::ThreadSafe> LookupTablePtr =
+			    LookupTableManager->GetLookupTable(LookupTableMD5);
+			if (!LookupTablePtr)
 			{
 				LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to get lookup table for MD5: %s"), *LookupTableMD5);
-				PostErrorPacket();
 				return false;
 			}
-			LookupTablesCache.Add(TargetISO639_2, LookupTable);
+			LookupTables.Add(TargetISO639_2, LookupTablePtr);
 		}
 		FString StrippedText = Segment.Text.Replace(*FString(1, &Thespeon::ControlCharacters::AudioSampleRequest), TEXT(""), ESearchCase::IgnoreCase);
-		TArray<FString> UnknownWords = GetUnknownWords(StrippedText, LangModule, LookupTablesCache[TargetISO639_2]);
+		TArray<FString> UnknownWords = GetUnknownWords(StrippedText, LangModule, LookupTables[TargetISO639_2].Get());
 		if (UnknownWords.Num() > 0)
 		{
 			UnknownWordsByISO.FindOrAdd(TargetISO639_2).Append(MoveTemp(UnknownWords));
@@ -564,7 +575,7 @@ uint32 Thespeon::Inference::ThespeonInference::Run()
 	{
 		const FString& ISO639_2 = Pair.Key;
 		const TArray<FString>& WordsToPhonemize = Pair.Value;
-		PhonemizeBatch(WordsToPhonemize, LanguageModulesCache[ISO639_2], LookupTablesCache[ISO639_2], InferenceWorkloadManager, InputConfig);
+		PhonemizeBatch(WordsToPhonemize, LanguageModules[ISO639_2].Get(), LookupTables[ISO639_2].Get(), &WorkloadCache, InputConfig);
 	}
 
 	// Phase 3: Build the final encoder token sequence from all segments.
@@ -610,18 +621,12 @@ uint32 Thespeon::Inference::ThespeonInference::Run()
 		else
 		{
 			FString TargetISO639_2 = Segment.Language.ISO639_2;
-			Thespeon::Language::LanguageModule* LangModule = LanguageModulesCache[TargetISO639_2];
+			Thespeon::Language::LanguageModule* LangModule = LanguageModules[TargetISO639_2].Get();
 			if (!PhonemizeSegment(
-			        Segment,
-			        CharacterModule,
-			        LookupTableManager->GetLookupTable(LangModule->GetLookupTableID()),
-			        SegmentTxtEncoded,
-			        AudioSampleRequestGlobalIndices,
-			        TextLengthSoFar
+			        Segment, CharacterModule, LookupTables[TargetISO639_2].Get(), SegmentTxtEncoded, AudioSampleRequestGlobalIndices, TextLengthSoFar
 			    ))
 			{
 				LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to process words with lookup table pipeline"));
-				PostErrorPacket();
 				return false;
 			}
 		}
@@ -630,7 +635,6 @@ uint32 Thespeon::Inference::ThespeonInference::Run()
 		if (LangKey == -1)
 		{
 			LINGO_LOG(EVerbosityLevel::Error, TEXT("Character module does not have a valid LangKey for language: %s"), *Segment.Language.ToJson());
-			PostErrorPacket();
 			return false;
 		}
 		EncodedTxt.Append(SegmentTxtEncoded);
@@ -710,7 +714,6 @@ uint32 Thespeon::Inference::ThespeonInference::Run()
 	if (!MetagraphFile)
 	{
 		LINGO_LOG(EVerbosityLevel::Error, TEXT("Metagraph file not found in module mappings"));
-		PostErrorPacket();
 		return false;
 	}
 	FString MetagraphFileName = MetagraphFile->GetFullFileName();
@@ -718,14 +721,14 @@ uint32 Thespeon::Inference::ThespeonInference::Run()
 	if (!bLoadedMetagraph)
 	{
 		LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to load metagraph from disk: %s"), *MetagraphFileName);
-		PostErrorPacket();
 		return false;
 	}
 
-	TWeakPtr<TAtomic<bool>> WeakAlive(AliveToken);
+	TWeakPtr<std::atomic<bool>> WeakAlive(AliveToken);
 	FMetaGraphRunner runner(
 	    TensorPool,
 	    CharacterModule,
+	    &WorkloadCache,
 	    InputConfig,
 	    Thespeon::Inference::FPostPacketFn{[this, WeakAlive](const Thespeon::Core::FThespeonDataPacket& PacketToSend)
 	                                       {
@@ -734,8 +737,8 @@ uint32 Thespeon::Inference::ThespeonInference::Run()
 		                                           [this, WeakAlive, PacketToSend]()
 		                                           {
 			                                           // Pin the weak pointer - fails if InferenceSession was destroyed
-			                                           TSharedPtr<TAtomic<bool>> StrongAlive = WeakAlive.Pin();
-			                                           if (!StrongAlive || !StrongAlive->Load())
+			                                           TSharedPtr<std::atomic<bool>> StrongAlive = WeakAlive.Pin();
+			                                           if (!StrongAlive || !StrongAlive->load())
 			                                           {
 				                                           return; // Object destroyed during shutdown, bail safely
 			                                           }
@@ -749,144 +752,60 @@ uint32 Thespeon::Inference::ThespeonInference::Run()
 	                                       }},
 	    [this, WeakAlive]()
 	    {
-		    TSharedPtr<TAtomic<bool>> StrongAlive = WeakAlive.Pin();
+		    TSharedPtr<std::atomic<bool>> StrongAlive = WeakAlive.Pin();
 		    // Treat a destroyed owner as "stop requested"
-		    return !StrongAlive || !StrongAlive->Load() || ShouldStop();
+		    return !StrongAlive || !StrongAlive->load() || ShouldStop();
 	    }
 
 	);
 	TArray<float> outvals;
-	return runner.Run(graph, outvals);
-}
-
-// Static method: Loads all ONNX models for a character and its supported languages into the workload manager.
-// Steps: 1) Find character in manifest, 2) Get/create CharacterModule, 3) For each supported language:
-//   load LanguageModule, register its workloads, register its lookup table, 4) Register character workloads.
-bool Thespeon::Inference::ThespeonInference::TryPreloadCharacter(
-    FString CharacterName, EThespeonModuleType ModuleType, const EBackendType BackendType
-)
-{
-	LINGO_LOG_FUNC(
-	    EVerbosityLevel::Debug, TEXT("called with CharacterName: %s, ModuleType: %s"), *CharacterName, *UEnum::GetValueAsString(ModuleType)
-	);
-	auto* Manifest = UManifestHandler::Get();
-	if (!Manifest)
+	if (!runner.Run(graph, outvals))
 	{
-		LINGO_LOG(EVerbosityLevel::Error, TEXT("ManifestHandler instance is null"));
-		return false;
-	}
-	Thespeon::Core::FModuleEntry Entry = Manifest->GetCharacterModuleEntry(CharacterName, ModuleType);
-	if (Entry.ModuleID.IsEmpty())
-	{
-		LINGO_LOG(
-		    EVerbosityLevel::Error,
-		    TEXT("Character '%s' of module type '%s' has not been imported and cannot be preloaded. "
-		         "Check the Lingotion Thespeon Info window (Window > Lingotion Thespeon Info) to see your imported character modules."),
-		    *CharacterName,
-		    *UEnum::GetValueAsString(ModuleType)
-		);
-		return false;
-	}
-	LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Got Character Entry: %s, %s, %s"), *Entry.ModuleID, *Entry.JsonPath, *Entry.Version.ToString());
-
-	// 2. If result, Get Module from ModuleManager
-	auto* ModuleManager = UModuleManager::Get();
-	if (!ModuleManager)
-	{
-		LINGO_LOG(EVerbosityLevel::Error, TEXT("ModuleManager instance is null"));
-		return false;
-	}
-
-	// 3. Get InferenceWorkloadManager from GameInstanceSubsystem
-	UInferenceWorkloadManager* InferenceWorkloadManager = FLingotionThespeonSubsystemUtils::GetInferenceWorkloadManager();
-	if (!InferenceWorkloadManager)
-	{
-		LINGO_LOG(EVerbosityLevel::Error, TEXT("InferenceWorkloadManager subsystem not found in GameInstance."));
-		return false;
-	}
-
-	// 4. If result, Get CharacterModule from ModuleManager
-	Thespeon::Character::CharacterModule* CharacterModule = ModuleManager->GetModule<Thespeon::Character::CharacterModule>(Entry);
-	if (!CharacterModule)
-	{
-		LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to get CharacterModule"));
-		return false; // or handle error appropriately
-	}
-	LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Got Character Module: %s"), *CharacterModule->ModuleID);
-
-	// 5. For each necessary language module find in manifest handler
-	int foundLanguageModules = 0;
-	for (const auto& kvp : CharacterModule->LanguageModuleIDs)
-	{
-		// If result, for each necessary language module find in manifest handler
-		Thespeon::Core::FModuleEntry LangEntry = Manifest->GetLanguageModuleEntry(kvp.Value);
-		if (LangEntry.ModuleID.IsEmpty())
-		{
-			LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("No language module entry found for ModuleName: %s"), *kvp.Value);
-			continue;
-		}
-		foundLanguageModules++;
-		LINGO_LOG_FUNC(
-		    EVerbosityLevel::Debug, TEXT("Got Language Entry: %s, %s, %s"), *LangEntry.ModuleID, *LangEntry.JsonPath, *LangEntry.Version.ToString()
-		);
-		// 6. If result, register language module in InferenceWorkloadManager
-		Thespeon::Language::LanguageModule* LangModule = ModuleManager->GetModule<Thespeon::Language::LanguageModule>(LangEntry);
-		if (!LangModule)
-		{
-			LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to get LanguageModule"));
-			return false;
-		}
-		LINGO_LOG_FUNC(EVerbosityLevel::Info, TEXT("Registering workload for Language Module: %s"), *(LangModule->ModuleID));
-		if (!InferenceWorkloadManager->RegisterModuleWorkload(LangModule, BackendType))
-		{
-			LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to register LanguageModule workload: %s"), *(LangModule->ModuleID));
-			return false;
-		}
-
-		// 7. Register lookup table in LookupTableManager
-		ULookupTableManager* LookupTableManager = FLingotionThespeonSubsystemUtils::GetLookupTableManager();
-		if (LookupTableManager)
-		{
-			LookupTableManager->RegisterLookupTable(LangModule);
-			LINGO_LOG_FUNC(EVerbosityLevel::Info, TEXT("Successfully registered lookup table for language module: %s"), *(LangModule->ModuleID));
-		}
-		else
-		{
-			LINGO_LOG_FUNC(
-			    EVerbosityLevel::Debug, TEXT("LookupTableManager subsystem not found in GameInstance. Lookup tables will not be available.")
-			);
-		}
-	}
-	if (foundLanguageModules == 0)
-	{
-		LINGO_LOG(
-		    EVerbosityLevel::Error, TEXT("None of the supported languages for character module was imported. Make sure to import at least one.")
-		);
-		return false;
-	}
-
-	// Register character module in InferenceWorkloadManager when all associated language modules are registered.
-	if (!InferenceWorkloadManager->RegisterModuleWorkload(CharacterModule, BackendType))
-	{
-		LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to register CharacterModule workload: %s"), *(CharacterModule->ModuleID));
-		return false;
+		// If the runner failed due to cancellation, return true so Run() routes
+		// to PostCancelledPacket() instead of PostErrorPacket().
+		return ShouldStop();
 	}
 	return true;
+}
+
+// Main inference pipeline. Runs on a background thread (FRunnable::Run).
+// Pipeline: preload models -> validate input -> collect unknown words across all segments ->
+// batch-phonemize unknowns per language -> encode all segments to encoder tokens ->
+// build input tensors -> load and execute the MetaGraph (which handles encoder/decoder/vocoder).
+// Cooperative cancellation is checked at key points via ShouldStop().
+uint32 Thespeon::Inference::ThespeonInference::Run()
+{
+	bool RunStatus = Thespeon::Inference::ThespeonInference::ExecuteInference();
+	if (!RunStatus)
+	{
+		PostErrorPacket();
+	}
+	else if (ShouldStop())
+	{
+		PostCancelledPacket();
+	}
+	// Convert boolean to error code (0 is success, else fail)
+	return RunStatus ? 0u : 1u;
 }
 
 // Static method: Unloads a character's ONNX models and its non-shared language modules from the workload manager.
 // Only unloads language modules that are not used by any other loaded character.
 bool Thespeon::Inference::ThespeonInference::TryUnloadCharacter(
-    const FString& CharacterName, const EThespeonModuleType& ModuleType, EBackendType BackendType
+    const FString& CharacterName,
+    const EThespeonModuleType& ModuleType,
+    EBackendType BackendType,
+    UInferenceWorkloadManager* InferenceWorkloadManager,
+    UModuleManager* ModuleManager,
+    ULookupTableManager* LookupTableManager,
+    UManifestHandler* Manifest
 )
 {
 	LINGO_LOG_FUNC(
 	    EVerbosityLevel::Debug, TEXT("called with CharacterName: %s, ModuleType: %s"), *CharacterName, *UEnum::GetValueAsString(ModuleType)
 	);
-	auto* Manifest = UManifestHandler::Get();
-	if (!Manifest)
+	if (!Manifest || !ModuleManager || !InferenceWorkloadManager || !LookupTableManager)
 	{
-		LINGO_LOG(EVerbosityLevel::Error, TEXT("ManifestHandler instance is null"));
+		LINGO_LOG(EVerbosityLevel::Error, TEXT("One or more subsystem pointers are null"));
 		return false;
 	}
 	Thespeon::Core::FModuleEntry Entry = Manifest->GetCharacterModuleEntry(CharacterName, ModuleType);
@@ -903,39 +822,19 @@ bool Thespeon::Inference::ThespeonInference::TryUnloadCharacter(
 	}
 	LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Got Character Entry: %s, %s, %s"), *Entry.ModuleID, *Entry.JsonPath, *Entry.Version.ToString());
 
-	// 2. If result, Get Module from ModuleManager
-	auto* ModuleManager = UModuleManager::Get();
-	if (!ModuleManager)
-	{
-		LINGO_LOG(EVerbosityLevel::Error, TEXT("ModuleManager instance is null"));
-		return false;
-	}
-
-	// 3. Get InferenceWorkloadManager from GameInstanceSubsystem
-	UInferenceWorkloadManager* InferenceWorkloadManager = FLingotionThespeonSubsystemUtils::GetInferenceWorkloadManager();
-	if (!InferenceWorkloadManager)
-	{
-		LINGO_LOG(EVerbosityLevel::Error, TEXT("InferenceWorkloadManager subsystem not found in GameInstance."));
-		return false;
-	}
-
-	// 4. If result, Get CharacterModule from ModuleManager
-	Thespeon::Character::CharacterModule* CharacterModule = ModuleManager->GetModule<Thespeon::Character::CharacterModule>(Entry, false);
-	if (!CharacterModule)
+	// 2. If result, Get CharacterModule from ModuleManager
+	// TSharedPtr keeps module alive for this scope; raw pointer used for downstream API compatibility
+	TSharedPtr<Thespeon::Character::CharacterModule, ESPMode::ThreadSafe> CharacterModulePtr =
+	    ModuleManager->GetModule<Thespeon::Character::CharacterModule>(Entry, false);
+	if (!CharacterModulePtr)
 	{
 		LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to get CharacterModule"));
-		return false; // or handle error appropriately
-	}
-	LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Got Character Module: %s"), *CharacterModule->ModuleID);
-
-	// 5. Remove all language modules for character module
-	ULookupTableManager* LookupTableManager = FLingotionThespeonSubsystemUtils::GetLookupTableManager();
-	if (!LookupTableManager)
-	{
-		LINGO_LOG(EVerbosityLevel::Error, TEXT("LookupTableManager subsystem not found in GameInstance."));
 		return false;
 	}
+	Thespeon::Character::CharacterModule* CharacterModule = CharacterModulePtr.Get();
+	LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Got Character Module: %s"), *CharacterModule->ModuleID);
 
+	// 3. Remove all language modules for character module
 	TSet<FString> langModulesToRemove = ModuleManager->GetNonOverlappingModelLangModules(CharacterModule);
 	for (const FString& langModule : langModulesToRemove)
 	{
@@ -946,14 +845,16 @@ bool Thespeon::Inference::ThespeonInference::TryUnloadCharacter(
 			return false;
 		}
 
-		Thespeon::Language::LanguageModule* currentLangModule = ModuleManager->GetModule<Thespeon::Language::LanguageModule>(Entry, false);
-		if (!currentLangModule)
+		TSharedPtr<Thespeon::Language::LanguageModule, ESPMode::ThreadSafe> currentLangModulePtr =
+		    ModuleManager->GetModule<Thespeon::Language::LanguageModule>(Entry, false);
+		if (!currentLangModulePtr)
 		{
 			LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to get Language module %s"), *Entry.ModuleID);
 			return false;
 		}
 
-		if (!InferenceWorkloadManager->TryDeregisterModuleWorkloads(currentLangModule, BackendType))
+		Thespeon::Language::LanguageModule* currentLangModule = currentLangModulePtr.Get();
+		if (!InferenceWorkloadManager->TryDeregisterModuleWorkloads(currentLangModule, BackendType, ModuleManager))
 		{
 			LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to deregister workloads of module %s"), *Entry.ModuleID);
 			return false;
@@ -970,8 +871,8 @@ bool Thespeon::Inference::ThespeonInference::TryUnloadCharacter(
 		}
 	}
 
-	// 6. Remove character module itself
-	if (!InferenceWorkloadManager->TryDeregisterModuleWorkloads(CharacterModule, BackendType))
+	// 4. Remove character module itself
+	if (!InferenceWorkloadManager->TryDeregisterModuleWorkloads(CharacterModule, BackendType, ModuleManager))
 	{
 		LINGO_LOG(
 		    EVerbosityLevel::Error,

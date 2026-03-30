@@ -95,11 +95,20 @@ FString Module::GetInternalModelID(const FString& InternalName) const
 // Dispatches model loading to the unreal async io thread and blocks the calling
 // worker thread with a TPromise/TFuture pair until loading completes (up to 10 second timeout).
 // Must NOT be called from the game thread itself, as it would deadlock.
-bool Module::LoadModelsAsync(const TArray<FSoftObjectPath>& SoftPaths, TArray<TStrongObjectPtr<UNNEModelData>>& OutLoadedModels) const
+bool Module::LoadModelsAsync(const TArray<FSoftObjectPath>& SoftPaths, TArray<TStrongObjectPtr<UNNEModelData>>& OutLoadedModels)
 {
 	if (SoftPaths.Num() == 0)
 	{
 		return true; // Nothing to load, that is okay (means everything is already loaded)
+	}
+
+	if (IsInGameThread())
+	{
+		LINGO_LOG(
+		    EVerbosityLevel::Error,
+		    TEXT("LoadModelsAsync must not be called from the game thread. Make sure not to defer to game thread when calling this function.")
+		);
+		return false;
 	}
 
 	auto Results = MakeShared<TArray<TStrongObjectPtr<UNNEModelData>>, ESPMode::ThreadSafe>();
@@ -140,14 +149,6 @@ bool Module::LoadModelsAsync(const TArray<FSoftObjectPath>& SoftPaths, TArray<TS
 		    );
 	    }
 	);
-	if (IsInGameThread())
-	{
-		LINGO_LOG(
-		    EVerbosityLevel::Error,
-		    TEXT("LoadModelsAsync must not be called from the game thread. Make sure not to defer to game thread when calling this function.")
-		);
-		return false;
-	}
 
 	if (!Future.WaitFor(FTimespan::FromSeconds(10))) // Wait up to 10 seconds for loading to complete
 	{

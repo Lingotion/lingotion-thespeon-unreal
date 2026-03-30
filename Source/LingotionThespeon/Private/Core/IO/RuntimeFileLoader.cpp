@@ -105,14 +105,3 @@ TUniquePtr<IFileHandle> RuntimeFileLoader::LoadFileAsStream(const FString& FileP
 	LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Successfully opened file stream: %s"), *FilePath);
 	return FileHandle;
 }
-
-bool FileExists(const FString& FilePath)
-{
-	if (FilePath.IsEmpty())
-	{
-		return false;
-	}
-
-	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
-	return PlatformFile.FileExists(*FilePath);
-}

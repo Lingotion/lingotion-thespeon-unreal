@@ -37,8 +37,8 @@ class ModelIOData
 	template <typename T> static ModelIOData Make(const UE::NNE::FTensorShape& Shape, T InitValue)
 	{
 		ModelIOData result(Shape, TNNEDataTypeOf<T>::Value);
-		result.DataBuffer.SetNumZeroed(result.MaxSizeInBytes);
 		checkf(result.MaxSizeInBytes <= (size_t)TNumericLimits<int32>::Max(), TEXT("Buffer too large for TArray<uint8>"));
+		result.DataBuffer.SetNumZeroed(result.MaxSizeInBytes);
 		TArray<T> initialValues;
 		initialValues.Init(InitValue, result.GetNumElements());
 		if (!result.TrySetValueFromArray<T>(initialValues))

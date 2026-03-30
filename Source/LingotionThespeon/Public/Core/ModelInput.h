@@ -1,4 +1,4 @@
-// This code and software are protected by intellectual property law and is the property of Lingotion AB, reg. no. 558341-4138, Sweden. The code and software may only be used and distributed according to the Terms of Service and Use found at www.lingotion.com.
+// This code and software are protected by intellectual property law and is the property of Lingotion AB, reg. no. 559341-4138, Sweden. The code and software may only be used and distributed according to the Terms of Service and Use found at www.lingotion.com.
 
 #pragma once
 
@@ -243,6 +243,7 @@ struct FLingotionModelInput
 	bool SetCharacterNameIfInvalid(class UManifestHandler* Manifest);
 	bool SetModuleTypeIfInvalid(class UManifestHandler* Manifest, EThespeonModuleType FallbackModuleType);
 	TArray<FLingotionLanguage> GetCandidateLanguages(class UManifestHandler* Manifest, class UModuleManager* ModuleManager);
+	FLingotionLanguage ResolveSegmentLanguage(const FLingotionInputSegment& Segment, const TArray<FLingotionLanguage>& CandidateLanguages) const;
 };
 namespace Thespeon
 {

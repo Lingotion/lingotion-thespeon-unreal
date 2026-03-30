@@ -35,11 +35,11 @@ class LINGOTIONTHESPEON_API ASimpleThespeonActor : public AActor
   private:
 	/** The Thespeon component that handles speech synthesis. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lingotion Thespeon", meta = (AllowPrivateAccess = "true"))
-	UThespeonComponent* ThespeonComponent;
+	TObjectPtr<UThespeonComponent> ThespeonComponent;
 
 	/** The audio stream component that plays the synthesized audio. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lingotion Thespeon", meta = (AllowPrivateAccess = "true"))
-	UAudioStreamComponent* AudioStreamComponent;
+	TObjectPtr<UAudioStreamComponent> AudioStreamComponent;
 
 	/** Name of the character voice to use for test synthesis. */
 	UPROPERTY(EditAnywhere, Category = "Thespeon Test Config")

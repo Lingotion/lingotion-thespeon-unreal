@@ -17,5 +17,4 @@ class LINGOTIONTHESPEON_API FLingotionThespeonModule : public IModuleInterface
 	void StartupModule() override;
 	/** Called when the module is unloaded. Performs plugin cleanup. */
 	void ShutdownModule() override;
-	static void SomeFunction();
 };

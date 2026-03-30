@@ -3,7 +3,7 @@
 #pragma once
 
 #include "Kismet/BlueprintFunctionLibrary.h"
-#include "ModelInput.h"
+#include "Core/ModelInput.h"
 #include "Core/RuntimeThespeonSettings.h"
 #include "LingotionBlueprintLibrary.generated.h"
 
@@ -21,12 +21,12 @@ class ULingotionBlueprintLibrary : public UBlueprintFunctionLibrary
 	/**
 	 * @brief Parses a JSON string into a FLingotionModelInput structure.
 	 *
-	 * @param JsonString The JSON string to parse.
+	 * @param FilePath The path to the JSON file to parse.
 	 * @param OutModelInput Receives the parsed model input on success.
 	 * @return true if parsing succeeded.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Lingotion Thespeon|JSON")
-	static bool ParseModelInputFromJson(const FString& JsonString, FLingotionModelInput& OutModelInput);
+	static bool ParseModelInputFromJson(const FString& FilePath, FLingotionModelInput& OutModelInput);
 
 	/**
 	 * @brief Validates that the selected character module (character name + module type) has been imported into the project and modifies ModelInput

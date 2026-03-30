@@ -20,14 +20,14 @@ void OnAudioReceived(FString SessionID, const TArray<float>& SynthData);
 The Thespeon component that handles speech synthesis.
 
 ```cpp
-UThespeonComponent* ThespeonComponent;
+TObjectPtr<UThespeonComponent> ThespeonComponent;
 ```
 
 ### `AudioStreamComponent`
 The audio stream component that plays the synthesized audio.
 
 ```cpp
-UAudioStreamComponent* AudioStreamComponent;
+TObjectPtr<UAudioStreamComponent> AudioStreamComponent;
 ```
 
 ### `TestCharacterName`

@@ -11,13 +11,13 @@ Exposes JSON parsing, audio saving, and control character helpers to Blueprints.
 Parses a JSON string into a FLingotionModelInput structure.
 
 **Parameters:**
-- `JsonString`: The JSON string to parse.
+- `FilePath`: The path to the JSON file to parse.
 - `OutModelInput`: Receives the parsed model input on success.
 
 **Returns:** true if parsing succeeded.
 
 ```cpp
-static bool ParseModelInputFromJson(const FString& JsonString, FLingotionModelInput& OutModelInput);
+static bool ParseModelInputFromJson(const FString& FilePath, FLingotionModelInput& OutModelInput);
 ```
 
 ### `ValidateCharacterModule`

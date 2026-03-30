@@ -26,22 +26,40 @@ class CharacterModule;
 
 class UInferenceWorkloadManager;
 class ULookupTableManager;
+class UModuleManager;
+class UManifestHandler;
 
 namespace Thespeon
 {
 namespace Inference
 {
+class FSessionWorkloadCache;
 /**
  * Concrete inference session that orchestrates the full TTS pipeline.
  *
  * Handles phonemization, encoder inference, and vocoder inference using
  * a MetaGraphRunner. Runs on a background thread via FRunnable.
+ *
+ * Subsystem pointers must be captured on the game thread and passed to
+ * the constructor before the session is started on a background thread.
  */
 class ThespeonInference : public InferenceSession
 {
   public:
-	ThespeonInference(const FLingotionModelInput& InInput, const FInferenceConfig InConfig, const FString& InSessionID)
+	ThespeonInference(
+	    const FLingotionModelInput& InInput,
+	    const FInferenceConfig InConfig,
+	    const FString& InSessionID,
+	    UInferenceWorkloadManager* InWorkloadManager,
+	    UModuleManager* InModuleManager,
+	    ULookupTableManager* InLookupTableManager,
+	    UManifestHandler* InManifestHandler
+	)
 	    : InferenceSession(InInput, InConfig, InSessionID)
+	    , InferenceWorkloadManager(InWorkloadManager)
+	    , ModuleManager(InModuleManager)
+	    , LookupTableManager(InLookupTableManager)
+	    , ManifestHandler(InManifestHandler)
 	{
 	}
 
@@ -55,40 +73,49 @@ class ThespeonInference : public InferenceSession
 	/** @brief Called after Run() completes for cleanup. */
 	void Exit() override;
 
-	/** @brief Attempts to preload the models for a character and module type into memory.
-	 *  @param CharacterName The name of the character to preload.
-	 *  @param ModuleType The module type (quality tier) to preload.
-	 *  @param BackendType The backend whose models should be preloaded.
-	 *  @return True if preloading succeeded. */
-	static bool TryPreloadCharacter(FString CharacterName, EThespeonModuleType ModuleType, EBackendType BackendType);
-
 	/** @brief Attempts to unload the models for a character and module type from memory.
-	 *  @param CharacterName The name of the character to unload.
-	 *  @param ModuleType The module type to unload.
-	 *  @param BackendType The backend whose models should be unloaded.
+	 *  Subsystem pointers must be captured on the game thread by the caller.
 	 *  @return True if unloading succeeded. */
-
-	static bool TryUnloadCharacter(const FString& CharacterName, const EThespeonModuleType& ModuleType, EBackendType BackendType);
+	static bool TryUnloadCharacter(
+	    const FString& CharacterName,
+	    const EThespeonModuleType& ModuleType,
+	    EBackendType BackendType,
+	    UInferenceWorkloadManager* InferenceWorkloadManager,
+	    UModuleManager* ModuleManager,
+	    ULookupTableManager* LookupTableManager,
+	    UManifestHandler* ManifestHandler
+	);
 
   private:
+	/**
+	 * Posts an error packet to the packet callback.
+	 */
 	void PostErrorPacket();
+	/**
+	 * Posts a cancellation packet to the packet callback.
+	 */
 	void PostCancelledPacket();
+	/**
+	 * Executes the inference steps.
+	 * @return true if inference suceeded, otherwise false
+	 */
+	bool ExecuteInference();
 
 	/**
 	 * Phonemizes a batch of words using the language module's phonemizer model.
 	 *
 	 * @param Words - Array of words to phonemize
 	 * @param LangModule - Language module containing phonemizer model and vocab
-	 * @param InferenceWorkloadManager - Manager to access phonemizer workload
+	 * @param LookupTable - Runtime lookup table for caching phoneme results
+	 * @param WorkloadCache - Session workload cache for acquiring exclusive phonemizer workload
 	 * @param Config - Inference configuration
-	 * @param OutBatchPhonemeTokens - Output array of phoneme token sequences for each word
 	 * @return true if phonemization succeeded, false otherwise
 	 */
 	bool PhonemizeBatch(
 	    const TArray<FString>& Words,
 	    Thespeon::Language::LanguageModule* LangModule,
 	    Thespeon::Language::RuntimeLookupTable* LookupTable,
-	    UInferenceWorkloadManager* InferenceWorkloadManager,
+	    Thespeon::Inference::FSessionWorkloadCache* WorkloadCache,
 	    const FInferenceConfig& Config
 	);
 	/**
@@ -119,6 +146,12 @@ class ThespeonInference : public InferenceSession
 	 */
 	TArray<FString>
 	GetUnknownWords(const FString& Text, Thespeon::Language::LanguageModule* LangModule, Thespeon::Language::RuntimeLookupTable* LookupTable);
+
+	/** Subsystem pointers captured on game thread at construction time */
+	UInferenceWorkloadManager* InferenceWorkloadManager = nullptr;
+	UModuleManager* ModuleManager = nullptr;
+	ULookupTableManager* LookupTableManager = nullptr;
+	UManifestHandler* ManifestHandler = nullptr;
 };
 } // namespace Inference
 } // namespace Thespeon

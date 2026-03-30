@@ -10,16 +10,16 @@ Thespeon::Language::RuntimeLookupTable::RuntimeLookupTable(const TMap<FString, F
 
 bool Thespeon::Language::RuntimeLookupTable::TryGetValue(const FString& Key, FString& OutValue) const
 {
-	// Check static table first, then dynamic - matching Unity behavior
-	// After user-provided entries are added, dynamic should be checked first
-	if (StaticLookupTable.Contains(Key))
-	{
-		OutValue = StaticLookupTable[Key];
-		return true;
-	}
+	FReadScopeLock ReadLock(TableLock);
+	// check generated/user-added table first
 	if (DynamicLookupTable.Contains(Key))
 	{
 		OutValue = DynamicLookupTable[Key];
+		return true;
+	}
+	if (StaticLookupTable.Contains(Key))
+	{
+		OutValue = StaticLookupTable[Key];
 		return true;
 	}
 
@@ -30,11 +30,13 @@ bool Thespeon::Language::RuntimeLookupTable::TryGetValue(const FString& Key, FSt
 
 bool Thespeon::Language::RuntimeLookupTable::ContainsKey(const FString& Key) const
 {
+	FReadScopeLock ReadLock(TableLock);
 	return StaticLookupTable.Contains(Key) || DynamicLookupTable.Contains(Key);
 }
 
 void Thespeon::Language::RuntimeLookupTable::AddOrUpdateDynamicEntry(const FString& Key, const FString& Value)
 {
+	FWriteScopeLock WriteLock(TableLock);
 	if (DynamicLookupTable.Contains(Key))
 	{
 		DynamicLookupTable[Key] = Value;

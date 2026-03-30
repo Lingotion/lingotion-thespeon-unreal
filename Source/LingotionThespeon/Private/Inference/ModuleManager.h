@@ -10,6 +10,7 @@
 #include "Character/CharacterModule.h"
 #include "Core/LingotionLogger.h"
 #include "Core/BackendType.h"
+#include "HAL/CriticalSection.h"
 #include "ModuleManager.generated.h"
 
 /**
@@ -30,15 +31,12 @@ class UModuleManager : public UGameInstanceSubsystem
 	template <typename T> void RegisterModule(Thespeon::Core::FModuleEntry ModuleEntry)
 	{
 		static_assert(std::is_base_of_v<Thespeon::Core::Module, T>, "T must derive from Module");
-		if (!Modules.Contains(ModuleEntry.ModuleID))
-		{
-			Modules.Add(ModuleEntry.ModuleID, MakeUnique<T>(ModuleEntry)); // assumes T has ctor(TModuleEntry)
-			LINGO_LOG_FUNC(EVerbosityLevel::Info, TEXT("Registered module '%s'."), *ModuleEntry.ModuleID);
-		}
+		FWriteScopeLock WriteLock(ModulesLock);
+		AddModuleIfAbsent_Locked<T>(ModuleEntry);
 	}
-	bool TryDeregisterModule(FString ModuleID); // deregisters all workloads in a module unless used by other module.
-	bool IsRegistered(FString ModuleID);        // checks if present in map.
-	template <typename T> T* GetModule(Thespeon::Core::FModuleEntry ModuleEntry, bool ShouldCreate = true)
+	bool TryDeregisterModule(FString ModuleID);
+	bool IsRegistered(FString ModuleID);
+	template <typename T> TSharedPtr<T, ESPMode::ThreadSafe> GetModule(Thespeon::Core::FModuleEntry ModuleEntry, bool ShouldCreate = true)
 	{
 		if (ModuleEntry.ModuleID.IsEmpty())
 		{
@@ -47,17 +45,26 @@ class UModuleManager : public UGameInstanceSubsystem
 		}
 		static_assert(std::is_base_of_v<Thespeon::Core::Module, T>, "T must derive from Module");
 
-		if (!Modules.Contains(ModuleEntry.ModuleID))
 		{
-			if (!ShouldCreate)
+			FReadScopeLock ReadLock(ModulesLock);
+			if (Modules.Contains(ModuleEntry.ModuleID))
 			{
-				LINGO_LOG(EVerbosityLevel::Error, TEXT("Module '%s' not found."), *ModuleEntry.ModuleID);
-				return nullptr;
+				return StaticCastSharedPtr<T>(Modules[ModuleEntry.ModuleID]);
 			}
-			LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Module '%s' not found. Creating "), *ModuleEntry.ModuleID);
-			RegisterModule<T>(ModuleEntry);
 		}
-		return static_cast<T*>(Modules[ModuleEntry.ModuleID].Get());
+		// Not found — need to create
+		if (!ShouldCreate)
+		{
+			LINGO_LOG(EVerbosityLevel::Error, TEXT("Module '%s' not found."), *ModuleEntry.ModuleID);
+			return nullptr;
+		}
+		LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Module '%s' not found. Creating "), *ModuleEntry.ModuleID);
+		{
+			FWriteScopeLock WriteLock(ModulesLock);
+			// Double-check after acquiring write lock
+			AddModuleIfAbsent_Locked<T>(ModuleEntry);
+			return StaticCastSharedPtr<T>(Modules[ModuleEntry.ModuleID]);
+		}
 	}
 	// Resource overlap detection - now uses safe dynamic_cast instead of enum + static_cast
 	TSet<FString> GetWorkloadIDsToRemove(
@@ -72,6 +79,17 @@ class UModuleManager : public UGameInstanceSubsystem
 	TSet<FString> GetNonOverlappingModelLangModules(Thespeon::Character::CharacterModule* Module);
 
   private:
-	inline static TWeakObjectPtr<UModuleManager> CachedInstance = nullptr;
-	TMap<FString, TUniquePtr<Thespeon::Core::Module>> Modules; // map of ModuleID to Module.
+	/** Creates a module if not already present. Caller must hold the write lock. */
+	template <typename T> void AddModuleIfAbsent_Locked(const Thespeon::Core::FModuleEntry& ModuleEntry)
+	{
+		static_assert(std::is_base_of_v<Thespeon::Core::Module, T>, "T must derive from Module");
+		if (!Modules.Contains(ModuleEntry.ModuleID))
+		{
+			Modules.Add(ModuleEntry.ModuleID, MakeShared<T, ESPMode::ThreadSafe>(ModuleEntry));
+			LINGO_LOG_FUNC(EVerbosityLevel::Info, TEXT("Registered module '%s'."), *ModuleEntry.ModuleID);
+		}
+	}
+
+	TMap<FString, TSharedPtr<Thespeon::Core::Module, ESPMode::ThreadSafe>> Modules;
+	mutable FRWLock ModulesLock;
 };

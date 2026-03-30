@@ -10,7 +10,9 @@
 #include "Engine/InferenceConfig.h"
 #include "HAL/Runnable.h"
 #include "HAL/Event.h"
+#include "HAL/CriticalSection.h"
 #include "Core/ThespeonDataPacket.h"
+#include <atomic>
 
 namespace Thespeon
 {
@@ -74,12 +76,13 @@ class InferenceSession : public FRunnable
 	/** @brief Returns true if stop has been requested. */
 	bool ShouldStop() const
 	{
-		return bStopRequested.Load();
+		return bStopRequested.load();
 	}
 
 	/** @brief Returns the reason for stopping. */
 	ESessionStopReason GetStopReason() const
 	{
+		FScopeLock Lock(&StopLock);
 		return StopReason;
 	}
 
@@ -94,11 +97,13 @@ class InferenceSession : public FRunnable
 	SessionTensorPool TensorPool;
 
 	/** Thread-safe flag indicating stop has been requested */
-	TAtomic<bool> bStopRequested;
-	/** Reason for the stop request */
-	ESessionStopReason StopReason;
+	std::atomic<bool> bStopRequested{false};
+	/** Reason for the stop request — protected by StopLock */
+	ESessionStopReason StopReason = ESessionStopReason::None;
+	/** Protects StopReason against concurrent reads/writes */
+	mutable FCriticalSection StopLock;
 	/** Shared token used to detect object lifetime in async lambdas */
-	TSharedRef<TAtomic<bool>> AliveToken = MakeShared<TAtomic<bool>>(true);
+	TSharedRef<std::atomic<bool>> AliveToken = MakeShared<std::atomic<bool>>(true);
 };
 
 } // namespace Inference
