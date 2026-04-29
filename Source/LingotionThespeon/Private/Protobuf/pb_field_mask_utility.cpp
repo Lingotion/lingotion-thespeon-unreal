@@ -1,3 +1,5 @@
+// Copyright 2025 - 2026 Lingotion AB All Rights Reserved
+
 // Wrapper for protobuf source file
 #if (defined(PLATFORM_MAC) && PLATFORM_MAC) || (defined(PLATFORM_LINUX) && PLATFORM_LINUX)
     #pragma clang diagnostic push
@@ -16,7 +18,7 @@
     #pragma warning(disable: 4459)
 #endif
 
-#include "../../../ThirdParty/Protobuf/protobuf/src/google/protobuf/util/internal/field_mask_utility.cc"
+#include <google/protobuf/util/internal/field_mask_utility.cc>
 
 #if (defined(PLATFORM_MAC) && PLATFORM_MAC) || (defined(PLATFORM_LINUX) && PLATFORM_LINUX)
     #pragma clang diagnostic pop

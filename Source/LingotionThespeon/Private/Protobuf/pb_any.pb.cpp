@@ -1,3 +1,5 @@
+// Copyright 2025 - 2026 Lingotion AB All Rights Reserved
+
 // Wrapper for protobuf source file
 #if (defined(PLATFORM_MAC) && PLATFORM_MAC) || (defined(PLATFORM_LINUX) && PLATFORM_LINUX)
     #pragma clang diagnostic push

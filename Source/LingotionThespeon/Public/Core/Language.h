@@ -1,4 +1,4 @@
-// This code and software are protected by intellectual property law and is the property of Lingotion AB, reg. no. 559341-4138, Sweden. The code and software may only be used and distributed according to the Terms of Service and Use found at www.lingotion.com.
+// Copyright 2025 - 2026 Lingotion AB All Rights Reserved
 
 #pragma once
 #include "CoreMinimal.h"
@@ -20,31 +20,31 @@ struct FLingotionLanguage
 	GENERATED_BODY()
 
 	/** ISO 639-2 three-letter language code (e.g. "eng", "swe"). Primary identifier used for language matching. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Language")
 	FString ISO639_2;
 
 	/** ISO 639-3 three-letter language code. More specific than ISO 639-2 for distinguishing individual languages. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Language")
 	FString ISO639_3;
 
 	/** Glottocode identifier for the language family or dialect (e.g. "stan1293" for Standard English). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Language")
 	FString Glottocode;
 
 	/** ISO 3166-1 country code (e.g. "US", "GB"). Used to distinguish regional variants of a language. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Language")
 	FString ISO3166_1;
 
 	/** ISO 3166-2 subdivision code (e.g. "US-TX"). Identifies sub-national language variants. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Language")
 	FString ISO3166_2;
 
 	/** Free-form dialect identifier for variants not covered by standard codes. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Language")
 	FString CustomDialect;
 
 	/** Human-readable display name, auto-generated from ISO639_2 and ISO3166_1 (e.g. "eng US"). */
-	UPROPERTY(BlueprintReadOnly)
+	UPROPERTY(BlueprintReadOnly, Category = "Language")
 	FString Name;
 
 	/** Sentinel value representing an undefined language. */

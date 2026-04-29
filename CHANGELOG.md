@@ -1,3 +1,8 @@
+# [1.1.1] - 2026-04-29
+## Added
+* Concurrent character preloading via GUI sample.
+* Additional instructions on how to get started with plugin.
+
 # [1.1.0] - 2026-03-30
 ## Added
 * Parallel synthesis across multiple `UThespeonComponent` instances via workload pooling.

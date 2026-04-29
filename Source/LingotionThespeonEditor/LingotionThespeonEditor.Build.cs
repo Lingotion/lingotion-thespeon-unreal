@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2025 - 2026 Lingotion AB All Rights Reserved
 
 using UnrealBuildTool;
 
@@ -63,8 +63,8 @@ public class LingotionThespeonEditor : ModuleRules
 				"ApplicationCore",
 				"HTTP",
 				"EditorScriptingUtilities"
-				
-				// ... add private dependencies that you statically link with here ...	
+
+				// ... add private dependencies that you statically link with here ...
 			}
 			);
 

@@ -1,3 +1,5 @@
+// Copyright 2025 - 2026 Lingotion AB All Rights Reserved
+
 #include "SubsystemUtils.h"
 #include "Inference/InferenceWorkloadManager.h"
 #include "Language/LookupTableManager.h"

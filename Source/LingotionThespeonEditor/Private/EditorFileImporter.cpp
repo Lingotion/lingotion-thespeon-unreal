@@ -1,4 +1,4 @@
-// This code and software are protected by intellectual property law and is the property of Lingotion AB, reg. no. 559341-4138, Sweden. The code and software may only be used and distributed according to the Terms of Service and Use found at www.lingotion.com.
+// Copyright 2025 - 2026 Lingotion AB All Rights Reserved
 
 #include "EditorFileImporter.h"
 #include "Core/IO/RuntimeFileLoader.h"
@@ -97,7 +97,7 @@ bool FEditorFileImporter::ExtractFileToTemp(const FString& FilePath, const FStri
 	// Unzip files with Python, quoted names to handle paths with spaces
 	FString Command = FString::Printf(
 	    TEXT("\"%s\" \"%s\" \"%s\""),
-	    *FPaths::Combine(RuntimeFileLoader::GetPluginDir(), TEXT("Source"), TEXT("Python"), TEXT("extract_zip.py")),
+	    *FPaths::Combine(RuntimeFileLoader::GetPluginDir(), TEXT("Content"), TEXT("Python"), TEXT("extract_zip.py")),
 	    *FPaths::ConvertRelativePathToFull(FilePath),
 	    *TempDir
 	);

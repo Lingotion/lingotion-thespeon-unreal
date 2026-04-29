@@ -8,8 +8,7 @@
 <a target="_blank" href="https://discord.gg/9f2HFyu5gF"><img src="https://dcbadge.limes.pink/api/server/https://discord.gg/9f2HFyu5gF" alt="Join our Discord server" /></a>
 
 
-**Lingotion Thespeon** is an on-device AI engine designed to generate real-time character acting and voiceovers.
-The plugin runs entirely offline on the player’s device, eliminating cloud costs and network dependencies.
+**Lingotion Thespeon** is an Unreal Engine plugin for on-device AI text-to-speech synthesis. It generates real-time character voiceovers with emotional control, running entirely offline on the player's device with no cloud costs or network dependencies.
 
 Please report any encountered [issues to the Issues page](https://github.com/Lingotion/lingotion-thespeon-unreal/issues) or in the Support section of the [Lingotion Discord](https://discord.gg/9f2HFyu5gF).
 
@@ -55,6 +54,8 @@ See [known-issues.md](./Docs/known-issues.md) for a list of known issues.
 ![License](https://img.shields.io/badge/license-Custom-blue.svg)
 
 This project is licensed according to the Terms of Service found at [lingotion.com/terms-of-service/](https://lingotion.com/terms-of-service/).
+
+The package distributed on Fab is provided under the [Fab Standard License (Fab EULA)](https://www.fab.com/eula).
 
 # Uninstalling Lingotion Thespeon 
 Simply uninstalling the plugin using the Plugin Manager will not remove all Thespeon related files. To completely remove Thespeon from your project you will also have to remove the following in the content browser: 

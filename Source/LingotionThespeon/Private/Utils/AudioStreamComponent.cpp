@@ -1,4 +1,4 @@
-// This code and software are protected by intellectual property law and is the property of Lingotion AB, reg. no. 559341-4138, Sweden. The code and software may only be used and distributed according to the Terms of Service and Use found at www.lingotion.com.
+// Copyright 2025 - 2026 Lingotion AB All Rights Reserved
 
 #include "Utils/AudioStreamComponent.h"
 #include "Misc/ScopeLock.h"
@@ -103,6 +103,7 @@ class FAudioStreamGenerator : public ISoundGenerator
 
 bool UAudioStreamComponent::Init(int32& SampleRate)
 {
+	SampleRate = 44100;
 	DeviceSampleRate = SampleRate;
 	NumChannels = FMath::Max(1, InputNumChannels);
 

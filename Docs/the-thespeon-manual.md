@@ -67,7 +67,7 @@ The primary method of the Thespeon Component is `Synthesize`. You provide an ins
 The call initiates a background thread to leave your game thread unblocked.
 
 > [!NOTE]
-> By default, `Synthesize` streams the generated audio directly to a built-in audio streaming component for immediate playback. If you bind the `OnAudioReceived` delegate, this default behavior is replaced and you receive the raw audio data instead, giving you full control over how it is used. See the [Delegates and Events](#delegates-and-events) section for details.
+> `Synthesize` delivers generated audio through the `OnAudioReceived` delegate. You must bind this delegate and route the audio data to a playback component such as `UAudioStreamComponent` (included in the plugin). See the [Delegates and Events](#delegates-and-events) section and the [Getting Started](./get-started-unreal.md#your-first-synthesis-in-blueprint) guide for setup details.
 
 If the requested character has not been preloaded, Thespeon will load it on demand before starting synthesis. This adds latency to the first call -- see [Preloading a Character](#preloading-a-character) for how to avoid this.
 
