@@ -91,8 +91,8 @@ bool UManifestHandler::TryGetCharacterModules(TSharedPtr<FJsonObject>& OutCharac
 	return true;
 }
 
-// Searches the manifest for a character module matching the given character name and quality tier.
-// Iterates all character_modules entries, checking each module's "characters" array and "quality" field.
+// Searches the manifest for a character module matching the given character name and size tier.
+// Iterates all character_modules entries, checking each module's "characters" array and size field.
 // Returns a populated FModuleEntry on match, or an empty entry if not found.
 Thespeon::Core::FModuleEntry UManifestHandler::GetCharacterModuleEntry(const FString& CharacterName, EThespeonModuleType ModuleType) const
 {
@@ -102,13 +102,13 @@ Thespeon::Core::FModuleEntry UManifestHandler::GetCharacterModuleEntry(const FSt
 	}
 
 	// Get the string name for the enum value (e.g., "L", "M", "XS")
-	const FString* ModuleTypeStringPtr = ModuleTypeToString.Find(ModuleType);
-	if (!ModuleTypeStringPtr)
+	const FString* RequestedSizePtr = ModuleTypeToFrontEndString.Find(ModuleType);
+	if (!RequestedSizePtr)
 	{
 		LINGO_LOG(EVerbosityLevel::Error, TEXT("Unknown module type: %s"), *UEnum::GetValueAsString(ModuleType));
 		return Thespeon::Core::FModuleEntry();
 	}
-	FString ModuleTypeString = *ModuleTypeStringPtr;
+	const FString& RequestedSize = *RequestedSizePtr;
 	// Access character modules
 	TSharedPtr<FJsonObject> CharacterModulesPtr;
 	if (!TryGetCharacterModules(CharacterModulesPtr))
@@ -124,7 +124,7 @@ Thespeon::Core::FModuleEntry UManifestHandler::GetCharacterModuleEntry(const FSt
 	for (const auto& ModulePair : CharacterModules->Values)
 	{
 		LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Checking module: %s"), *ModulePair.Key);
-		const FString& ModuleId = ModulePair.Key;
+		const FString ModuleId(*ModulePair.Key);
 		const TSharedPtr<FJsonObject> ModuleObj = ModulePair.Value->AsObject();
 		if (!ModuleObj.IsValid())
 		{
@@ -148,12 +148,12 @@ Thespeon::Core::FModuleEntry UManifestHandler::GetCharacterModuleEntry(const FSt
 			}
 		}
 
-		// Check "quality" field
-		FString Quality;
-		ModuleObj->TryGetStringField(TEXT("quality"), Quality);
+		// Compare through the enum rather than the raw string, so a manifest written with
+		// either the size tier or a legacy quality name resolves to the same module.
+		const FString SizeString = ReadModuleSizeField(ModuleObj);
 
 		// If both match, return this module
-		if (bCharacterMatch && Quality == ModuleTypeString)
+		if (bCharacterMatch && FindModuleType(SizeString) == ModuleType)
 		{
 			FString JsonPath;
 			ModuleObj->TryGetStringField(TEXT("jsonpath"), JsonPath);
@@ -161,10 +161,10 @@ Thespeon::Core::FModuleEntry UManifestHandler::GetCharacterModuleEntry(const FSt
 		}
 		LINGO_LOG_FUNC(
 		    EVerbosityLevel::Debug,
-		    TEXT("No match for module: %s (CharacterMatch: %s, Quality: %s)"),
+		    TEXT("No match for module: %s (CharacterMatch: %s, Size: %s)"),
 		    *ModuleId,
 		    bCharacterMatch ? TEXT("true") : TEXT("false"),
-		    *Quality
+		    *SizeString
 		);
 	}
 
@@ -173,7 +173,7 @@ Thespeon::Core::FModuleEntry UManifestHandler::GetCharacterModuleEntry(const FSt
 	    EVerbosityLevel::Error,
 	    TEXT("No matching character module found for character '%s' of type '%s'. Try importing the desired character."),
 	    *CharacterName,
-	    *ModuleTypeString
+	    *RequestedSize
 	);
 	return Thespeon::Core::FModuleEntry();
 }
@@ -200,8 +200,8 @@ Thespeon::Core::FModuleEntry UManifestHandler::GetLanguageModuleEntry(const FStr
 	const TSharedPtr<FJsonObject>& LangModules = *LangModulesObjPtr;
 
 	// Find the module by key == ModuleName
-	const TSharedPtr<FJsonValue>* ValuePtr = LangModules->Values.Find(ModuleName);
-	if (!ValuePtr || !(*ValuePtr).IsValid())
+	const TSharedPtr<FJsonValue> ModuleValue = LangModules->TryGetField(ModuleName);
+	if (!ModuleValue.IsValid())
 	{
 		LINGO_LOG(
 		    EVerbosityLevel::Warning,
@@ -210,7 +210,7 @@ Thespeon::Core::FModuleEntry UManifestHandler::GetLanguageModuleEntry(const FStr
 		return Thespeon::Core::FModuleEntry();
 	}
 
-	const TSharedPtr<FJsonObject> ModuleObj = (*ValuePtr)->AsObject();
+	const TSharedPtr<FJsonObject> ModuleObj = ModuleValue->AsObject();
 	if (!ModuleObj.IsValid())
 	{
 		LINGO_LOG(EVerbosityLevel::Error, TEXT("Language module '%s' is not a valid object."), *ModuleName);
@@ -223,6 +223,43 @@ Thespeon::Core::FModuleEntry UManifestHandler::GetLanguageModuleEntry(const FStr
 
 	// Return the entry (ModuleId = key name, JsonPath = field)
 	return Thespeon::Core::FModuleEntry(ModuleName, JsonPath, ReadVersionObject(ModuleObj));
+}
+
+bool UManifestHandler::HasLanguageModule(const FString& ModuleID) const
+{
+	if (IsRootInvalid())
+	{
+		return false;
+	}
+
+	const TSharedPtr<FJsonObject>* LangModulesObjPtr = nullptr;
+	if (!Root->TryGetObjectField(TEXT("language_modules"), LangModulesObjPtr) || !LangModulesObjPtr)
+	{
+		return false;
+	}
+
+	return (*LangModulesObjPtr)->TryGetField(ModuleID).IsValid();
+}
+
+// Coarse language-only lookup used when the exact language module ID a character asks for is not
+// imported. Returns the first imported module whose language matches; module IDs encode a revision,
+// so this deliberately ignores that part of the identity.
+FString UManifestHandler::FindLanguageModuleIDForISO(const FString& ISO639_2) const
+{
+	if (ISO639_2.IsEmpty())
+	{
+		return FString();
+	}
+
+	for (const FLanguageModuleInfo& Info : GetAllLanguageModules())
+	{
+		if (Info.Iso639_2.Equals(ISO639_2, ESearchCase::IgnoreCase))
+		{
+			return Info.ModuleID;
+		}
+	}
+
+	return FString();
 }
 
 // Iterates all valid entries in character_modules, invoking Callback for each.
@@ -247,7 +284,7 @@ void UManifestHandler::IterateCharacterModules(TFunctionRef<void(const FString&,
 		{
 			continue;
 		}
-		Callback(ModulePair.Key, ModuleObj);
+		Callback(FString(*ModulePair.Key), ModuleObj);
 	}
 }
 
@@ -320,7 +357,7 @@ TSet<FString> UManifestHandler::GetAllAvailableCharacters() const
 	return result;
 }
 
-// Returns all available quality tiers (module types) for a given character, mapped to their module IDs.
+// Returns all available size tiers (module types) for a given character, mapped to their module IDs.
 // Iterates every character_modules entry to find modules whose "characters" array contains CharacterName.
 TMap<EThespeonModuleType, FString> UManifestHandler::GetModuleTypesOfCharacter(const FString& CharacterName) const
 {
@@ -341,8 +378,7 @@ TMap<EThespeonModuleType, FString> UManifestHandler::GetModuleTypesOfCharacter(c
 		    {
 			    if (CharacterName == CharacterValue->AsString())
 			    {
-				    FString ModuleTypeString;
-				    ModuleObj->TryGetStringField(TEXT("quality"), ModuleTypeString);
+				    const FString ModuleTypeString = ReadModuleSizeField(ModuleObj);
 				    EThespeonModuleType ModuleType = FindModuleType(ModuleTypeString);
 				    if (ModuleType != EThespeonModuleType::None)
 				    {
@@ -359,40 +395,58 @@ TMap<EThespeonModuleType, FString> UManifestHandler::GetModuleTypesOfCharacter(c
 // Extracts a semantic version (major.minor.patch) from a module's "version" JSON sub-object.
 Thespeon::Core::FVersion UManifestHandler::ReadVersionObject(const TSharedPtr<FJsonObject>& ModuleObj) const
 {
-	int32 Major = 0, Minor = 0, Patch = 0;
+	int32 Major = -1, Minor = -1, Patch = -1;
 
 	const TSharedPtr<FJsonObject>* VersionObjPtr = nullptr;
 	if (ModuleObj.IsValid() && ModuleObj->TryGetObjectField(TEXT("version"), VersionObjPtr) && VersionObjPtr && (*VersionObjPtr).IsValid())
 	{
-		double Num = 0.0;
-		if ((*VersionObjPtr)->TryGetNumberField(TEXT("major"), Num))
+		double MajorNum = -1.0;
+		double MinorNum = -1.0;
+		double PatchNum = -1.0;
+		if ((*VersionObjPtr)->TryGetNumberField(TEXT("major"), MajorNum) && (*VersionObjPtr)->TryGetNumberField(TEXT("minor"), MinorNum) &&
+		    (*VersionObjPtr)->TryGetNumberField(TEXT("patch"), PatchNum))
 		{
-			Major = static_cast<int32>(Num);
+			Major = static_cast<int32>(MajorNum);
+			Minor = static_cast<int32>(MinorNum);
+			Patch = static_cast<int32>(PatchNum);
 		}
-		if ((*VersionObjPtr)->TryGetNumberField(TEXT("minor"), Num))
+		else
 		{
-			Minor = static_cast<int32>(Num);
-		}
-		if ((*VersionObjPtr)->TryGetNumberField(TEXT("patch"), Num))
-		{
-			Patch = static_cast<int32>(Num);
+			LINGO_LOG(EVerbosityLevel::Warning, TEXT("Lingotion module version object rejected: module config has no valid 'version' field."));
 		}
 	}
 
 	return Thespeon::Core::FVersion(Major, Minor, Patch);
 }
 
-FString UManifestHandler::GetQuality(const FString& QualityString, const FString& ModuleID) const
+FString UManifestHandler::GetModuleSizeString(const FString& ModuleTypeString, const FString& ModuleID)
 {
-	const EThespeonModuleType* ModuleTypePtr = StringToModuleType.Find(QualityString);
+	const EThespeonModuleType* ModuleTypePtr = StringToModuleType.Find(ModuleTypeString);
 	if (ModuleTypePtr)
 	{
-		const FString* QualityPtr = ModuleTypeToFrontEndString.Find(*ModuleTypePtr);
-		return QualityPtr ? *QualityPtr : TEXT("");
+		const FString* SizePtr = ModuleTypeToFrontEndString.Find(*ModuleTypePtr);
+		return SizePtr ? *SizePtr : TEXT("");
 	}
 
-	LINGO_LOG(EVerbosityLevel::Warning, TEXT("Unknown quality string '%s' for module '%s'"), *QualityString, *ModuleID);
+	LINGO_LOG(EVerbosityLevel::Warning, TEXT("Unknown module size '%s' for module '%s'"), *ModuleTypeString, *ModuleID);
 	return TEXT("");
+}
+
+// Reads a module's size tier, accepting the legacy "quality" field from manifests written
+// before the rename so an existing manifest keeps resolving until it is regenerated.
+FString UManifestHandler::ReadModuleSizeField(const TSharedPtr<FJsonObject>& ModuleObj)
+{
+	FString SizeString;
+	if (!ModuleObj.IsValid())
+	{
+		return SizeString;
+	}
+	// A present-but-empty "size" is treated as absent, so the legacy field still gets a chance.
+	if (!ModuleObj->TryGetStringField(TEXT("size"), SizeString) || SizeString.IsEmpty())
+	{
+		ModuleObj->TryGetStringField(TEXT("quality"), SizeString);
+	}
+	return SizeString;
 }
 
 TArray<FCharacterModuleInfo> UManifestHandler::GetAllCharacterModules() const
@@ -406,9 +460,8 @@ TArray<FCharacterModuleInfo> UManifestHandler::GetAllCharacterModules() const
 		    Info.ModuleID = ModuleId;
 		    ModuleObj->TryGetStringField(TEXT("name"), Info.Name);
 		    ModuleObj->TryGetStringField(TEXT("jsonpath"), Info.JsonPath);
-		    FString typeString = "";
-		    ModuleObj->TryGetStringField(TEXT("quality"), typeString);
-		    Info.Quality = GetQuality(typeString, Info.ModuleID);
+		    Info.Size = GetModuleSizeString(ReadModuleSizeField(ModuleObj), Info.ModuleID);
+		    Info.Version = ReadVersionObject(ModuleObj);
 
 		    // Get character name (first element of characters array)
 		    const TArray<TSharedPtr<FJsonValue>>* CharactersArray = nullptr;
@@ -447,9 +500,10 @@ TArray<FLanguageModuleInfo> UManifestHandler::GetAllLanguageModules() const
 			}
 
 			FLanguageModuleInfo Info;
-			Info.ModuleID = ModulePair.Key;
+			Info.ModuleID = FString(*ModulePair.Key);
 			ModuleObj->TryGetStringField(TEXT("name"), Info.Name);
 			ModuleObj->TryGetStringField(TEXT("jsonpath"), Info.JsonPath);
+			Info.Version = ReadVersionObject(ModuleObj);
 
 			// Get language name (first element of languages array, nameinenglish field)
 			const TArray<TSharedPtr<FJsonValue>>* LanguagesArray = nullptr;

@@ -17,7 +17,7 @@
  * Display information for a character module entry, used by editor UI.
  *
  * Contains the module identifier, originating name, JSON path,
- * character name, and quality tier string.
+ * character name, size tier string, and module version.
  * For now the ModuleId is the same as the Name.
  */
 struct FCharacterModuleInfo
@@ -34,15 +34,18 @@ struct FCharacterModuleInfo
 	/** The human-readable character name. */
 	FString CharacterName;
 
-	/** The quality tier string (e.g., "XS", "S", "M", "L", "XL"). */
-	FString Quality;
+	/** The size tier string (e.g., "XS", "S", "M", "L", "XL"). */
+	FString Size;
+
+	/** The semantic module version. */
+	Thespeon::Core::FVersion Version;
 };
 
 /**
  * Display information for a language module entry, used by editor UI.
  *
  * Contains the module identifier, originating name, JSON path,
- * language name, and ISO 639-2 language code.
+ * language name, ISO 639-2 language code, and module version.
  */
 struct FLanguageModuleInfo
 {
@@ -60,6 +63,9 @@ struct FLanguageModuleInfo
 
 	/** The ISO 639-2 (3-letter) language code. */
 	FString Iso639_2;
+
+	/** The semantic module version. */
+	Thespeon::Core::FVersion Version;
 };
 
 /**
@@ -114,8 +120,8 @@ class LINGOTIONTHESPEON_API UManifestHandler : public UEngineSubsystem
 	/**
 	 * Matches a string to a module type enum value.
 	 *
-	 * Accepts both internal strings (e.g., "ultralow", "mid", "ultrahigh")
-	 * and front-end strings (e.g., "XS", "M", "XL").
+	 * Accepts both size tiers (e.g., "XS", "M", "XL") and the legacy quality
+	 * names (e.g., "ultralow", "mid", "ultrahigh").
 	 *
 	 * @param ModuleTypeString The string to match against known module type names.
 	 * @return The matching EThespeonModuleType, or EThespeonModuleType::None if no match is found.
@@ -124,10 +130,22 @@ class LINGOTIONTHESPEON_API UManifestHandler : public UEngineSubsystem
 	EThespeonModuleType FindModuleType(const FString& ModuleTypeString) const;
 
 	/**
-	 * Retrieves the module entry for a character at the specified quality tier.
+	 * Normalizes a module type string to its canonical size tier string.
+	 *
+	 * Accepts the same spellings as FindModuleType and always returns a size tier,
+	 * so callers can write "XS".."XL" regardless of how the module was packaged.
+	 *
+	 * @param ModuleTypeString The string to normalize.
+	 * @param ModuleID The module the string came from, used for diagnostics.
+	 * @return The canonical size tier string, or an empty string if unrecognized.
+	 */
+	static FString GetModuleSizeString(const FString& ModuleTypeString, const FString& ModuleID);
+
+	/**
+	 * Retrieves the module entry for a character at the specified size tier.
 	 *
 	 * @param CharacterName The name of the character to look up.
-	 * @param ModuleType The quality tier of the desired module.
+	 * @param ModuleType The size tier of the desired module.
 	 * @return The matching FModuleEntry, or an empty entry if not found.
 	 */
 	Thespeon::Core::FModuleEntry GetCharacterModuleEntry(const FString& CharacterName, EThespeonModuleType ModuleType) const;
@@ -139,6 +157,26 @@ class LINGOTIONTHESPEON_API UManifestHandler : public UEngineSubsystem
 	 * @return The matching FModuleEntry, or an empty entry if not found.
 	 */
 	Thespeon::Core::FModuleEntry GetLanguageModuleEntry(const FString& ModuleName) const;
+
+	/**
+	 * Checks whether a language module with the given ID has been imported.
+	 *
+	 * @param ModuleID The language module identifier to look for.
+	 * @return True if the manifest contains an entry under that exact ID.
+	 */
+	bool HasLanguageModule(const FString& ModuleID) const;
+
+	/**
+	 * Finds the ID of any imported language module that serves the given language.
+	 *
+	 * Character modules reference language modules by an exact ID that encodes the module's
+	 * revision, so a character built against a newer revision cannot find an older imported one.
+	 * This provides a coarse fallback by language alone.
+	 *
+	 * @param ISO639_2 The ISO 639-2 code to match against imported language modules.
+	 * @return The manifest ID of a matching language module, or an empty string if none serves it.
+	 */
+	FString FindLanguageModuleIDForISO(const FString& ISO639_2) const;
 
 	/**
 	 * Returns all languages supported by a character module.
@@ -161,7 +199,7 @@ class LINGOTIONTHESPEON_API UManifestHandler : public UEngineSubsystem
 	TSet<FString> GetAllAvailableCharacters() const;
 
 	/**
-	 * Returns a mapping of module quality tiers to module ID strings for a character.
+	 * Returns a mapping of module size tiers to module ID strings for a character.
 	 *
 	 * @param CharacterName The character name to look up.
 	 * @return A map from EThespeonModuleType to the corresponding module ID string.
@@ -191,18 +229,17 @@ class LINGOTIONTHESPEON_API UManifestHandler : public UEngineSubsystem
 	 */
 	bool IsFileShared(const FString& MD5) const;
 
+	/**
+	 * Reads a version object from a JSON module definition.
+	 *
+	 * @param ModuleObj The JSON object containing version fields (major, minor, patch).
+	 * @return The parsed FVersion struct.
+	 */
+	Thespeon::Core::FVersion ReadVersionObject(const TSharedPtr<FJsonObject>& ModuleObj) const;
+
   private:
 	/** The parsed root JSON object from LingotionThespeonManifest.json  */
 	TSharedPtr<FJsonObject> Root;
-
-	/** Maps EThespeonModuleType enum values to their internal string representation (e.g., "ultralow", "mid"). */
-	static inline const TMap<EThespeonModuleType, FString> ModuleTypeToString = {
-	    {EThespeonModuleType::XS, TEXT("ultralow")},
-	    {EThespeonModuleType::S, TEXT("low")},
-	    {EThespeonModuleType::M, TEXT("mid")},
-	    {EThespeonModuleType::L, TEXT("high")},
-	    {EThespeonModuleType::XL, TEXT("ultrahigh")}
-	};
 
 	/** Maps EThespeonModuleType enum values to their front-end display string (e.g., "XS", "M", "XL"). */
 	static inline const TMap<EThespeonModuleType, FString> ModuleTypeToFrontEndString = {
@@ -213,7 +250,12 @@ class LINGOTIONTHESPEON_API UManifestHandler : public UEngineSubsystem
 	    {EThespeonModuleType::XL, TEXT("XL")}
 	};
 
-	/** Maps string representations (both internal and front-end) to their EThespeonModuleType enum value. */
+	/**
+	 * Maps module type strings to their EThespeonModuleType enum value.
+	 *
+	 * The "ultralow".."ultrahigh" entries are the legacy quality names, kept so modules
+	 * packaged before the switch to size tiers still resolve. Remove once those are retired.
+	 */
 	static inline const TMap<FString, EThespeonModuleType> StringToModuleType = {
 	    {TEXT("ultralow"), EThespeonModuleType::XS},
 	    {TEXT("low"), EThespeonModuleType::S},
@@ -253,18 +295,13 @@ class LINGOTIONTHESPEON_API UManifestHandler : public UEngineSubsystem
 	void IterateCharacterModules(TFunctionRef<void(const FString&, const TSharedPtr<FJsonObject>&)> Callback) const;
 
 	/**
-	 * Reads a version object from a JSON module definition.
+	 * Reads a module entry's size tier string from the manifest.
 	 *
-	 * @param ModuleObj The JSON object containing version fields (major, minor, patch).
-	 * @return The parsed FVersion struct.
-	 */
-	Thespeon::Core::FVersion ReadVersionObject(const TSharedPtr<FJsonObject>& ModuleObj) const;
-
-	/**
-	 * Gets the front-end display string for a given module quality.
+	 * Falls back to the legacy "quality" field for manifests written before the field was
+	 * renamed to "size", so an existing manifest keeps working until it is regenerated.
 	 *
-	 * @param QualityString The internal string representation of the quality.
-	 * @return The front-end display string.
+	 * @param ModuleObj The module JSON object to read from.
+	 * @return The size tier string, or an empty string if neither field is present.
 	 */
-	FString GetQuality(const FString& QualityString, const FString& ModuleID) const;
+	static FString ReadModuleSizeField(const TSharedPtr<FJsonObject>& ModuleObj);
 };

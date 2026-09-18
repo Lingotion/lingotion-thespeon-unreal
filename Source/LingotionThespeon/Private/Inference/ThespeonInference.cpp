@@ -12,31 +12,12 @@
 #include "InferenceWorkloadManager.h"
 #include "PreloadSession.h"
 #include "Language/TextPreprocessor.h"
-#include <fstream>
-#include "meta_graph.pb.h"
+#include <type_traits>
+#include "Core/meta_graph.pb.h"
 #include "MetaGraphRunner.h"
 #include "SessionWorkloadCache.h"
-
-// Loads a protobuf-serialized MetaGraph from disk. Used to load the character's inference graph definition.
-bool LoadModelFromDisk(const FString& Path, metaonnx::MetaGraph& OutGraph)
-{
-	std::string NativePath = TCHAR_TO_UTF8(*Path);
-
-	std::ifstream Input(NativePath, std::ios::binary);
-	if (!Input.is_open())
-	{
-		LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to open protobuf file: %s"), *Path);
-		return false;
-	}
-
-	if (!OutGraph.ParseFromIstream(&Input))
-	{
-		LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to parse protobuf file: %s"), *Path);
-		return false;
-	}
-
-	return true;
-}
+#include "Inference/ThespeonEditorSignals.h"
+#include "Async/Async.h"
 
 void Thespeon::Inference::ThespeonInference::PostErrorPacket()
 {
@@ -162,103 +143,69 @@ bool Thespeon::Inference::ThespeonInference::PhonemizeBatch(
 		FlatGraphemeTokens.Append(Tokens);
 	}
 
-	const int32 MaxPhonemeLength = 50; // Maximum autoregressive iterations
+	LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Starting phonemization with %d words, max src length %d"), BatchSize, MaxSrcLength);
 
-	TSharedPtr<InferenceWorkload, ESPMode::ThreadSafe> PhonemizerWorkload =
-	    WorkloadCache->GetWorkload(LangModule->GetInternalModelID(TEXT("phonemizer")));
-	if (!PhonemizerWorkload)
+	const UE::NNE::FTensorShape SrcShape = UE::NNE::FTensorShape::Make({static_cast<uint32>(BatchSize), static_cast<uint32>(MaxSrcLength)});
+	TensorPool.SetTensor(TEXT("src"), ModelIOData::MakeFromArray<int64>(SrcShape, FlatGraphemeTokens));
+
+	// Parsed once per module and shared by every session — the graph is read-only during Run().
+	TSharedPtr<const metaonnx::MetaGraph, ESPMode::ThreadSafe> PhonemizerGraph = LangModule->GetMetaGraph();
+	if (!PhonemizerGraph.IsValid())
 	{
-		LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to get phonemizer workload"));
+		LINGO_LOG(EVerbosityLevel::Error, TEXT("Could not get phonemizer metagraph for language module '%s'"), *LangModule->ModuleID);
 		return false;
 	}
 
-	// Initialize batch state
-	TArray<int64> CurrentTgt;
-	TArray<int64> CurrentMask;
-	TArray<int64> FinishedIndices;
-	CurrentTgt.Init(StartToken, BatchSize); // [B]
-	CurrentMask.Init(1, BatchSize);         // [B]
-	FinishedIndices.Init(0, BatchSize);     // [B] - all words still active
-	int32 CurrentTgtLength = CurrentTgt.Num() / BatchSize;
+	// The graph emits no external data, so eventual packets are logged and dropped
+	FMetaGraphRunner PhonemizerRunner(
+	    TensorPool,
+	    LangModule,
+	    WorkloadCache,
+	    Config,
+	    Thespeon::Inference::FPostPacketFn{[](const Thespeon::Core::FThespeonDataPacket& Packet) {
+		    LINGO_LOG(
+		        EVerbosityLevel::Debug, TEXT("Phonemizer graph emitted a packet of type %d; dropping it."), static_cast<int32>(Packet.CallbackType)
+		    );
+	    }},
+	    [this]() { return ShouldStop(); }
+	);
 
-	LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Starting phonemization with %d words, max src length %d"), BatchSize, MaxSrcLength);
-	TArray<FString> PhonemizerInputNames = {TEXT("src"), TEXT("tgt"), TEXT("mask_tensor"), TEXT("finished_indices")};
-	TArray<UE::NNE::FTensorShape> PhonemizerInputShapes = {
-	    UE::NNE::FTensorShape::Make({static_cast<uint32>(BatchSize), static_cast<uint32>(MaxSrcLength)}),
-	    UE::NNE::FTensorShape::Make({static_cast<uint32>(BatchSize), static_cast<uint32>(CurrentTgtLength)}),
-	    UE::NNE::FTensorShape::Make({static_cast<uint32>(BatchSize), static_cast<uint32>(CurrentTgtLength)}),
-	    UE::NNE::FTensorShape::Make({static_cast<uint32>(BatchSize)})
-	};
-
-	// Set input tensors in pool
-	TensorPool.SetTensor(PhonemizerInputNames[0], ModelIOData::MakeFromArray<int64>(PhonemizerInputShapes[0], FlatGraphemeTokens));
-	TensorPool.SetTensor(PhonemizerInputNames[1], ModelIOData::MakeFromArray<int64>(PhonemizerInputShapes[1], CurrentTgt));
-	TensorPool.SetTensor(PhonemizerInputNames[2], ModelIOData::MakeFromArray<int64>(PhonemizerInputShapes[2], CurrentMask));
-	TensorPool.SetTensor(PhonemizerInputNames[3], ModelIOData::MakeFromArray<int64>(PhonemizerInputShapes[3], FinishedIndices));
-	// Autoregressive loop: iteratively predicts the next phoneme token for each word in the batch.
-	// Continues until all words have produced an EOS token or MaxPhonemeLength is reached.
-	for (int32 Step = 0; Step < MaxPhonemeLength; ++Step)
+	if (!PhonemizerRunner.Run(*PhonemizerGraph))
 	{
-		// Prepare output shapes - phonemizer outputs: new_tgt, new_mask, new_finished_indices, num_finished, next_word
-		TArray<UE::NNE::FTensorShape> PhonemizerOutputShapes = {
-		    UE::NNE::FTensorShape::Make({static_cast<uint32>(BatchSize), static_cast<uint32>(CurrentTgtLength + 1)}), // new_tgt
-		    UE::NNE::FTensorShape::Make({static_cast<uint32>(BatchSize), static_cast<uint32>(CurrentTgtLength + 1)}), // new_mask
-		    UE::NNE::FTensorShape::Make({static_cast<uint32>(BatchSize)}),                                            // new_finished_indices
-		    UE::NNE::FTensorShape::Make({1}),                                                                         // num_finished (scalar)
-		    UE::NNE::FTensorShape::Make({static_cast<uint32>(BatchSize)})                                             // next_word [B]
-		};
-
-		// Run inference
-		bool bPhonemizeSucceeded = PhonemizerWorkload->Infer(TensorPool, PhonemizerOutputShapes, Config, TEXT("Phonemizer"));
-		if (!bPhonemizeSucceeded)
-		{
-			LINGO_LOG(EVerbosityLevel::Error, TEXT("Phonemizer iteration failed to run, aborting."));
-			return false;
-		}
-
-		if (!TensorPool.TryRenameTensor(TEXT("new_tgt"), TEXT("tgt")) || !TensorPool.TryRenameTensor(TEXT("new_mask"), TEXT("mask_tensor")) ||
-		    !TensorPool.TryRenameTensor(TEXT("new_finished_indices"), TEXT("finished_indices")))
-		{
-			LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to rename phonemizer output tensors for next iteration"));
-			return false;
-		}
-		// Get output tensors
-		ModelIOData* NumFinishedTensor = nullptr;
-		if (!TensorPool.TryGetTensor(TEXT("num_finished"), NumFinishedTensor))
-		{
-			LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to get phonemizer num_finished tensor"));
-			return false;
-		}
-
-		// Check batch completion via num_finished
-		int64 NumFinished = NumFinishedTensor->GetDataAsValue<int64>(0);
-
-		if (NumFinished >= BatchSize)
-		{
-			LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Phonemization completed at step %d - all %d words finished"), Step, BatchSize);
-			break;
-		}
-
-		// Update state for next iteration
-		CurrentTgtLength++;
+		LINGO_LOG(EVerbosityLevel::Error, TEXT("Phonemizer metagraph failed to run, aborting phonemization."));
+		return false;
 	}
 
-	// Extract final tensors after autoregressive loop
+	const TCHAR* FinalTgtName = TEXT("tgt.in");
+	const TCHAR* FinalFinishedName = TEXT("finished_indices.in");
+
 	ModelIOData* FinalTgtTensor = nullptr;
-	if (!TensorPool.TryGetTensor(TEXT("tgt"), FinalTgtTensor))
+	if (!TensorPool.TryGetTensor(FinalTgtName, FinalTgtTensor) || !FinalTgtTensor)
 	{
-		LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to get final tgt tensor"));
+		LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to get final '%s' tensor from phonemizer graph"), FinalTgtName);
 		return false;
 	}
 	TArray<int64> PhonemeIndices = FinalTgtTensor->GetDataAsArray<int64>();
 
 	ModelIOData* FinishedIndicesTensor = nullptr;
-	if (!TensorPool.TryGetTensor(TEXT("finished_indices"), FinishedIndicesTensor))
+	if (!TensorPool.TryGetTensor(FinalFinishedName, FinishedIndicesTensor) || !FinishedIndicesTensor)
 	{
-		LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to get final finished_indices tensor"));
+		LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to get final '%s' tensor from phonemizer graph"), FinalFinishedName);
 		return false;
 	}
 	TArray<int64> FinalFinishedIndices = FinishedIndicesTensor->GetDataAsArray<int64>();
+
+	if (PhonemeIndices.Num() < BatchSize || FinalFinishedIndices.Num() < BatchSize)
+	{
+		LINGO_LOG(
+		    EVerbosityLevel::Error,
+		    TEXT("Phonemizer graph returned undersized output for a batch of %d (tgt=%d, finished_indices=%d)"),
+		    BatchSize,
+		    PhonemeIndices.Num(),
+		    FinalFinishedIndices.Num()
+		);
+		return false;
+	}
 
 	int32 Stride = PhonemeIndices.Num() / BatchSize;
 	// Update dynamic lookup table with newly phonemized words
@@ -431,15 +378,21 @@ bool Thespeon::Inference::ThespeonInference::ExecuteInference()
 
 	// Preload character to ensure models are loaded
 	const EThespeonModuleType EffectiveModuleType = Input.ModuleType != EThespeonModuleType::None ? Input.ModuleType : InputConfig.ModuleType;
+	// High priority: any model loads triggered by an inline synth-time preload must jump ahead of
+	// background preload requests already queued in FStreamableManager (value matches
+	// FStreamableManager::AsyncLoadHighPriority).
+	constexpr int32 SynthLoadPriority = 100;
 	Thespeon::Inference::FPreloadSession preload = Thespeon::Inference::FPreloadSession(
 	    Input.CharacterName,
 	    EffectiveModuleType,
 	    InputConfig.BackendType,
+	    InputConfig.bForceRequestedBackend,
 	    InferenceWorkloadManager,
 	    ModuleManager,
 	    LookupTableManager,
 	    ManifestHandler,
-	    nullptr
+	    nullptr,
+	    SynthLoadPriority
 	);
 	preload.Init();
 	preload.Run();
@@ -504,10 +457,69 @@ bool Thespeon::Inference::ThespeonInference::ExecuteInference()
 	    *(CharacterModule->Version.ToString())
 	);
 
+#if WITH_EDITOR
+	// Editor-only data caching. Delegates are not thread-safe so we broadcast to the game thread.
+	if (SessionID != TEXT("LINGOTION_WARMUP"))
+	{
+		Thespeon::Inference::FThespeonDataCache DataCache;
+		TMap<FString, double>& ModuleCounts = DataCache.Data.Add(CharacterModule->ModuleID);
+		ModuleCounts.Add(TEXT("nbrSynths"), 1.0);
+
+		const UEnum* EmotionEnum = StaticEnum<EEmotion>();
+		for (const FLingotionInputSegment& Segment : Input.Segments)
+		{
+			const double L = static_cast<double>(Segment.Text.Len());
+			if (L <= 0.0)
+			{
+				continue;
+			}
+
+			// Distinct emotions present across the segment's start/end blend keypoints.
+			TSet<EEmotion> SegmentEmotions;
+			for (const TMap<EEmotion, float>* Blend : {&Segment.StartEmotion, &Segment.EndEmotion})
+			{
+				for (const TPair<EEmotion, float>& Pair : *Blend)
+				{
+					if (Pair.Value > 0.0f)
+					{
+						SegmentEmotions.Add(Pair.Key);
+					}
+				}
+			}
+
+			// Per-emotion character integral over the linearly-interpolated blend: L*(startW+endW)/2.
+			// Summed over all emotions this equals L (each keypoint's weights sum to 1).
+			for (const EEmotion Emotion : SegmentEmotions)
+			{
+				const double Contribution = L * (Segment.StartEmotion.FindRef(Emotion) + Segment.EndEmotion.FindRef(Emotion)) / 2.0;
+				if (Contribution <= 0.0)
+				{
+					continue;
+				}
+				const FString EmotionName =
+				    EmotionEnum ? EmotionEnum->GetNameStringByValue(static_cast<int64>(Emotion)) : FString::FromInt(static_cast<int32>(Emotion));
+				ModuleCounts.FindOrAdd(EmotionName.ToLower()) += Contribution;
+			}
+
+			// Blend-cardinality histogram: chars synthesized with 1 / 2 / 3+ simultaneous emotions.
+			const int32 Cardinality = SegmentEmotions.Num();
+			if (Cardinality >= 1)
+			{
+				const TCHAR* BlendKey = Cardinality == 1 ? TEXT("blend1") : (Cardinality == 2 ? TEXT("blend2") : TEXT("blend3plus"));
+				ModuleCounts.FindOrAdd(BlendKey) += L;
+			}
+		}
+
+		AsyncTask(
+		    ENamedThreads::GameThread,
+		    [DataCache = MoveTemp(DataCache)]() { Thespeon::Inference::FThespeonEditorSignals::OnSynthesisDataSignal.Broadcast(DataCache); }
+		);
+	}
+#endif // WITH_EDITOR
+
 	// Phase 1: Collect unknown words across all segments, grouped by language.
 	// Each language gets its own batch for the phonemizer model.
 	bool bIsFirstSegment = true;
-	EEmotion lastEmotion = EEmotion::None;
 	int64 lastLanguageKey = -1;
 	TMap<FString, TArray<FString>> UnknownWordsByISO;
 	TMap<FString, TSharedPtr<Thespeon::Language::LanguageModule, ESPMode::ThreadSafe>> LanguageModules;
@@ -583,8 +595,53 @@ bool Thespeon::Inference::ThespeonInference::ExecuteInference()
 	// Each segment contributes encoded phoneme tokens plus per-token emotion and language IDs.
 	TArray<int64> EncodedTxt;
 	EncodedTxt.Append(CharacterModule->EncodePhonemes(TEXT("⏩")));
-	TArray<int64> emotions;
 	TArray<int64> languages;
+
+	// Emotion keypoints: collect distinct emotions used across all segments' Start/End blends
+	// (first-appearance order). Each becomes a row in the k×N emotions / emotion_blending tensors.
+	// Assumes ValidateAndPopulate has already sanitized the blends (no EEmotion::None, weights sum to 1).
+	TArray<EEmotion> DistinctEmotions;
+	TMap<EEmotion, int32> EmotionRow;
+	for (const FLingotionInputSegment& Segment : Input.Segments)
+	{
+		for (const TMap<EEmotion, float>* Blend : {&Segment.StartEmotion, &Segment.EndEmotion})
+		{
+			for (const TPair<EEmotion, float>& Pair : *Blend)
+			{
+				if (!EmotionRow.Contains(Pair.Key))
+				{
+					EmotionRow.Add(Pair.Key, DistinctEmotions.Num());
+					DistinctEmotions.Add(Pair.Key);
+				}
+			}
+		}
+	}
+	const int32 k = DistinctEmotions.Num();
+	auto MapToVector = [&](const TMap<EEmotion, float>& M) -> TArray<float>
+	{
+		TArray<float> V;
+		V.Init(0.0f, k);
+		for (const TPair<EEmotion, float>& Pair : M)
+		{
+			const int32 Row = EmotionRow.FindChecked(Pair.Key);
+			V[Row] = Pair.Value;
+		}
+		return V;
+	};
+
+	// Per-segment token span + start/end keypoints, recorded during the loop below.
+	struct FSegmentControlSpan
+	{
+		int32 TokenCount;
+		TArray<float> StartVec;
+		TArray<float> EndVec;
+		float StartSpeed;
+		float EndSpeed;
+		float StartLoudness;
+		float EndLoudness;
+	};
+	TArray<FSegmentControlSpan> ControlSpans;
+	ControlSpans.Reserve(Input.Segments.Num());
 
 	// Process segments to final encoder token sequence
 	int TextLengthSoFar = 0;
@@ -638,28 +695,28 @@ bool Thespeon::Inference::ThespeonInference::ExecuteInference()
 			return false;
 		}
 		EncodedTxt.Append(SegmentTxtEncoded);
-		TArray<int64> SegmentEmotions;
 		TArray<int64> SegmentLanguages;
 		int len = SegmentTxtEncoded.Num() + (bIsFirstSegment ? 1 : 0); // Account for SOS token in first segment
 		bIsFirstSegment = false;
-		SegmentEmotions.Init(static_cast<int64>(Segment.Emotion), len);
 		SegmentLanguages.Init(LangKey, len);
-		emotions.Append(SegmentEmotions);
 		languages.Append(SegmentLanguages);
-		LINGO_LOG_FUNC(
-		    EVerbosityLevel::Debug,
-		    TEXT("Segment processed: %d encoder tokens, Emotion: %s, Language: %s"),
-		    SegmentTxtEncoded.Num(),
-		    *UEnum::GetValueAsString(Segment.Emotion),
-		    *Segment.Language.ToJson()
+		ControlSpans.Add(
+		    {SegmentTxtEncoded.Num(),
+		     MapToVector(Segment.StartEmotion),
+		     MapToVector(Segment.EndEmotion),
+		     Segment.StartSpeed,
+		     Segment.EndSpeed,
+		     Segment.StartLoudness,
+		     Segment.EndLoudness}
 		);
-		lastEmotion = Segment.Emotion;
+		LINGO_LOG_FUNC(
+		    EVerbosityLevel::Debug, TEXT("Segment processed: %d encoder tokens, Language: %s"), SegmentTxtEncoded.Num(), *Segment.Language.ToJson()
+		);
 		lastLanguageKey = LangKey;
 	}
 
 	// EOS token
 	EncodedTxt.Append(CharacterModule->EncodePhonemes(TEXT("⏪")));
-	emotions.Add(static_cast<int64>(lastEmotion));
 	languages.Add(lastLanguageKey);
 
 	// Log complete encoder sequence
@@ -670,57 +727,132 @@ bool Thespeon::Inference::ThespeonInference::ExecuteInference()
 	}
 	LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Complete encoder sequence (%d tokens): [%s]"), EncodedTxt.Num(), *TokensStr);
 
-	TArray<int64> actors;
 	TArray<float> speed;
 	TArray<float> loudness;
 	uint32 txt_len = EncodedTxt.Num();
-	actors.Init(1, 1);
-	speed.Init(1.0f, txt_len);
-	loudness.Init(1.0f, txt_len);
 	TArray<int64> text_lengths;
 	text_lengths.Init(txt_len, 1);
 
-	TArray<UE::NNE::FTensorShape> InputTensorShapes = {
-	    UE::NNE::FTensorShape::Make({1, txt_len}),
-	    UE::NNE::FTensorShape::Make({1, txt_len}),
-	    UE::NNE::FTensorShape::Make({1}),
-	};
-
-	TArray<UE::NNE::FTensorShape> encoderOutputShapes = {
-	    UE::NNE::FTensorShape::Make({1, 96, 2 * txt_len}),
-	    UE::NNE::FTensorShape::Make({1, 1, 2 * txt_len}),
-	    UE::NNE::FTensorShape::Make({1, 1, 2 * txt_len}),
-	    UE::NNE::FTensorShape::Make({1, 2 * txt_len}),
-	    UE::NNE::FTensorShape::Make({1, 1}),
-	    UE::NNE::FTensorShape::Make({1, txt_len}),
-	    UE::NNE::FTensorShape::Make({1}),
-	};
-
-	TArray<FString> InputNames = {TEXT("phoneme_keys"), TEXT("emotions"), TEXT("text_lengths")};
-
-	// Set input tensors in pool
-	TensorPool.SetTensor(InputNames[0], ModelIOData::MakeFromArray<int64>(InputTensorShapes[0], EncodedTxt));
-	TensorPool.SetTensor(InputNames[1], ModelIOData::MakeFromArray<int64>(InputTensorShapes[1], emotions));
-	TensorPool.SetTensor(InputNames[2], ModelIOData::MakeFromArray<int64>(InputTensorShapes[2], text_lengths));
-	uint32 NumSampleRequestIndices = AudioSampleRequestGlobalIndices.Num();
-	TensorPool.SetTensor(
-	    TEXT("target_phoneme_indices"),
-	    ModelIOData::MakeFromArray<int64>(UE::NNE::FTensorShape::Make({NumSampleRequestIndices}), AudioSampleRequestGlobalIndices)
-	);
-
-	// TODO: load the meta graph file detailed in the .json file instead
-	metaonnx::MetaGraph graph;
-	const Thespeon::Core::FModuleFile* MetagraphFile = CharacterModule->InternalFileMappings.Find(TEXT("metagraph"));
-	if (!MetagraphFile)
+	// Build scalar control curves over the same token layout as emotion:
+	// SOS, encoded segment tokens, EOS. Speed follows the encoder's doubled
+	// sequence, so each token's interpolated speed is repeated twice.
+	const int32 N = static_cast<int32>(txt_len);
+	speed.Init(1.0f, 2 * N);
+	loudness.Init(1.0f, N);
+	auto WriteControlSample = [&speed, &loudness](const int32 TokenIndex, const float SpeedValue, const float LoudnessValue)
 	{
-		LINGO_LOG(EVerbosityLevel::Error, TEXT("Metagraph file not found in module mappings"));
-		return false;
+		speed[2 * TokenIndex] = SpeedValue;
+		speed[2 * TokenIndex + 1] = SpeedValue;
+		loudness[TokenIndex] = LoudnessValue;
+	};
+
+	// Build the scalar controls and k×N emotion tensors from keypoints.
+	// Token layout: SOS, tokens in order, EOS.
+	// emotion_blending[:,c] = proportion vector at token c sum=1.0, lerp between keypoints.
+	// emotions[:,c] = constant list of the k distinct emotion IDs. Both row-major for shape {k, txt_len}.
+	TArray<float> Blending;
+	Blending.Init(0.0f, k * N);
+	if (ControlSpans.Num() > 0)
+	{
+		// SOS = first segment's start keypoints
+		WriteControlSample(0, ControlSpans[0].StartSpeed, ControlSpans[0].StartLoudness);
+		for (int32 r = 0; r < k; ++r)
+		{
+			Blending[r * N + 0] = ControlSpans[0].StartVec[r];
+		}
+		int32 Cursor = 1; // token index 0 is SOS
+		for (const FSegmentControlSpan& Span : ControlSpans)
+		{
+			const int32 L = Span.TokenCount;
+			for (int32 j = 0; j < L; ++j)
+			{
+				const float t = (L == 1) ? 0.5f : (static_cast<float>(j) / static_cast<float>(L - 1));
+				WriteControlSample(Cursor + j, FMath::Lerp(Span.StartSpeed, Span.EndSpeed, t), FMath::Lerp(Span.StartLoudness, Span.EndLoudness, t));
+				for (int32 r = 0; r < k; ++r)
+				{
+					Blending[r * N + (Cursor + j)] = Span.StartVec[r] + (Span.EndVec[r] - Span.StartVec[r]) * t;
+				}
+			}
+			Cursor += L;
+		}
+		// EOS = last segment's end keypoints
+		WriteControlSample(N - 1, ControlSpans.Last().EndSpeed, ControlSpans.Last().EndLoudness);
+		for (int32 r = 0; r < k; ++r)
+		{
+			Blending[r * N + (N - 1)] = ControlSpans.Last().EndVec[r];
+		}
 	}
-	FString MetagraphFileName = MetagraphFile->GetFullFileName();
-	const bool bLoadedMetagraph = LoadModelFromDisk(Thespeon::Core::IO::RuntimeFileLoader::GetRuntimeFilePath(MetagraphFileName), graph);
-	if (!bLoadedMetagraph)
+
+	TArray<int64> EmotionIds;
+	EmotionIds.SetNumUninitialized(k * N);
+	for (int32 r = 0; r < k; ++r)
 	{
-		LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to load metagraph from disk: %s"), *MetagraphFileName);
+		const int64 Id = static_cast<int64>(DistinctEmotions[r]);
+		for (int32 c = 0; c < N; ++c)
+		{
+			EmotionIds[r * N + c] = Id;
+		}
+	}
+
+	// Debug: dump the distinct emotion set and the first few interpolated blend columns.
+	FString EmoStr;
+	for (int32 r = 0; r < k; ++r)
+	{
+		EmoStr += FString::Printf(TEXT("%s(%lld) "), *UEnum::GetValueAsString(DistinctEmotions[r]), static_cast<int64>(DistinctEmotions[r]));
+	}
+	LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Emotion tensors: k=%d, N=%d, emotions=[%s]"), k, N, *EmoStr);
+	for (int32 c = 0; c < FMath::Min(N, 10); ++c)
+	{
+		FString ColStr;
+		for (int32 r = 0; r < k; ++r)
+		{
+			ColStr += FString::Printf(TEXT("%.3f "), Blending[r * N + c]);
+		}
+		LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("  emotion_blending[:,%d] = [%s]"), c, *ColStr);
+	}
+
+	const uint32 NumEmotions = static_cast<uint32>(k);
+	struct FInputTensor
+	{
+		FString Name;
+		UE::NNE::FTensorShape Shape;
+		ModelIOData Data;
+	};
+
+	auto MakeInputTensor = [](const TCHAR* Name, const UE::NNE::FTensorShape& Shape, const auto& Values)
+	{
+		using ElementType = typename std::decay_t<decltype(Values)>::ElementType;
+		return FInputTensor{Name, Shape, ModelIOData::MakeFromArray<ElementType>(Shape, Values)};
+	};
+	int64 CharacterKey = CharacterModule->GetCharacterKey();
+	if (CharacterKey == -1)
+	{
+		LINGO_LOG(EVerbosityLevel::Warning, TEXT("Character module does not have a valid CharacterKey"));
+		CharacterKey = 1; // Fallback to 1 to avoid invalid tensor
+	}
+	const uint32 NumSampleRequestIndices = AudioSampleRequestGlobalIndices.Num();
+	TArray<FInputTensor> InputTensors = {
+	    MakeInputTensor(TEXT("phoneme_keys"), UE::NNE::FTensorShape::Make({1, txt_len}), EncodedTxt),
+	    MakeInputTensor(TEXT("emotions"), UE::NNE::FTensorShape::Make({1, NumEmotions, txt_len}), EmotionIds),
+	    MakeInputTensor(TEXT("emotions_blending"), UE::NNE::FTensorShape::Make({1, NumEmotions, txt_len}), Blending),
+	    MakeInputTensor(TEXT("actors"), UE::NNE::FTensorShape::Make({1, 1}), TArray<int64>{CharacterKey}),
+	    MakeInputTensor(TEXT("languages"), UE::NNE::FTensorShape::Make({1, txt_len}), languages),
+	    MakeInputTensor(TEXT("text_lengths"), UE::NNE::FTensorShape::Make({1}), text_lengths),
+	    MakeInputTensor(TEXT("speed"), UE::NNE::FTensorShape::Make({1, 2 * txt_len}), speed),
+	    MakeInputTensor(TEXT("loudness"), UE::NNE::FTensorShape::Make({1, 1, txt_len}), loudness),
+	    MakeInputTensor(TEXT("target_phoneme_indices"), UE::NNE::FTensorShape::Make({NumSampleRequestIndices}), AudioSampleRequestGlobalIndices),
+	};
+
+	for (FInputTensor& InputTensor : InputTensors)
+	{
+		TensorPool.SetTensor(InputTensor.Name, MoveTemp(InputTensor.Data));
+	}
+
+	// Parsed once per module and shared by every session — the graph is read-only during Run().
+	TSharedPtr<const metaonnx::MetaGraph, ESPMode::ThreadSafe> graph = CharacterModule->GetMetaGraph();
+	if (!graph.IsValid())
+	{
+		LINGO_LOG(EVerbosityLevel::Error, TEXT("Could not get metagraph for character module '%s'"), *CharacterModule->ModuleID);
 		return false;
 	}
 
@@ -758,8 +890,7 @@ bool Thespeon::Inference::ThespeonInference::ExecuteInference()
 	    }
 
 	);
-	TArray<float> outvals;
-	if (!runner.Run(graph, outvals))
+	if (!runner.Run(*graph))
 	{
 		// If the runner failed due to cancellation, return true so Run() routes
 		// to PostCancelledPacket() instead of PostErrorPacket().

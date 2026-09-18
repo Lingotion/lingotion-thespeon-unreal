@@ -78,7 +78,7 @@ If the requested character has not been preloaded, Thespeon will load it on dema
 
 While `Synthesize` will automatically load a character if needed, the loading process takes time and significantly affects real-time performance. To avoid this, you can preload characters ahead of time using `PreloadCharacter`. Parallel preloading is supported. Provide the character name, [`EThespeonModuleType`](./API/EThespeonModuleType.md), and optionally an `FInferenceConfig` to specify whether to load to the CPU or GPU backend.
 
-`PreloadCharacter` is non-blocking -- the request is added to a queue and processed asynchronously. The `OnPreloadComplete` delegate fires when the operation finishes. See the GUISample Level Blueprint for an example of how preloading is done in practice.
+`PreloadCharacter` is non-blocking -- the request is added to a queue and processed asynchronously. The `OnPreloadComplete` delegate fires when the operation finishes.
 
 > [!CAUTION]
 > `PreloadCharacter` requires the specified character name and module type to exactly match an imported character module. Unlike `Synthesize`, it will not fall back to another character or module type if the specified combination is not found. Verify your imported modules in the Lingotion Thespeon Info window (`Window > Lingotion Thespeon Info`).
@@ -86,7 +86,7 @@ While `Synthesize` will automatically load a character if needed, the loading pr
 > [!NOTE]
 > The backend chosen during preloading determines the backend on which `Synthesize` runs, regardless of any `FInferenceConfig` provided later to `Synthesize`.
 
-The first synthesis for each character also has higher latency due to buffer initializations. Preloading with a mock synthesis beforehand can alleviate this -- the GUISample scene demonstrates this pattern.
+The first synthesis for each character also has higher latency due to buffer initializations. Preloading with a mock synthesis beforehand can alleviate this.
 
 ### Preloading a Character Group
 
@@ -147,6 +147,53 @@ On each segment you may also specify:
 
 > [!WARNING]
 > For a character to speak a given language, the character must support it and you must also have imported the relevant language module into your Unreal project.
+
+### Blending emotions and shaping delivery
+Instead of a single emotion, a segment can carry an emotion *blend* at its start and another at its end, plus speed and loudness values for each of those two boundaries:
+```cpp
+FLingotionModelInput ModelInput;
+ModelInput.Segments = {
+    FLingotionInputSegment(
+        TEXT("Hi! This is my voice "),
+        { { EEmotion::Joy, 1.0f } }, //StartEmotion
+        { { EEmotion::Joy, 0.5f }, { EEmotion::Anticipation, 0.5f } }, //EndEmotion
+        FLingotionLanguage(), //Language 
+        false, //bIsCustomPronounced
+        1.0f, //StartSpeed 
+        1.2f //EndSpeed 
+    ),
+    FLingotionInputSegment(
+        TEXT("generated in real time!"),
+        { { EEmotion::Anticipation, 1.0f } }, //StartEmotion
+        { { EEmotion::Anger, 1.0f } },  //EndEmotion
+        FLingotionLanguage(), //Language 
+        false, //bIsCustomPronounced
+        1.0f, //StartSpeed
+        1.0f, //EndSpeed
+        1.0f, //StartLoudness
+        1.4f //EndLoudness
+    )
+};
+```
+
+The same thing can be done field by field, which is often clearer when you only want to set a couple of the boundary values:
+
+```cpp
+FLingotionInputSegment Segment;
+Segment.Text = TEXT("Hi! This is my voice ");
+Segment.StartEmotion = { { EEmotion::Joy, 1.0f } };
+Segment.EndEmotion = { { EEmotion::Joy, 0.5f }, { EEmotion::Anticipation, 0.5f } };
+Segment.EndSpeed = 1.2f;
+```
+
+Weights are clamped to `[0,1]` and normalized to sum to 1. All the boundary values across the input act as keypoints on a single curve over the whole line, so values are interpolated smoothly between the keypoints you supply, held flat before the first and after the last one, and may jump where one segment ends and the next begins. Passing an empty blend (or one containing only `EEmotion::None`) means "no opinion here" and lets the curve pass straight through that boundary.
+
+> [!NOTE]
+> The single `Emotion` field is the legacy form: setting it is equivalent to giving both boundaries a blend of that one emotion at full weight.
+
+> [!TIP]
+> For the full list of available emotions, see the [`EEmotion` enum](./API/EEmotion.md). Language codes follow [ISO 639-3](https://en.wikipedia.org/wiki/ISO_639-3) (e.g. `"eng"` for English, `"swe"` for Swedish). Available languages and dialects for your character are shown in the **Characters** tab of the Thespeon Info Window. 
+---
 
 ### Fallback Handling
 

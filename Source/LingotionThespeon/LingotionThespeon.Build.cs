@@ -40,7 +40,8 @@ public class LingotionThespeon : ModuleRules
 				"Projects",
 				"DeveloperSettings",
 				"InputCore",
-				"Protobuf",
+				"UMG",
+				"LingotionProtobuf",
 			}
 			);
 
@@ -48,7 +49,7 @@ public class LingotionThespeon : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
-				"Core", "CoreUObject", "Engine", "NNE", "Json", "JsonUtilities", "Projects"
+				"Core", "CoreUObject", "Engine", "NNE", "Json", "JsonUtilities", "Projects", "Slate", "SlateCore"
 				// ... add private dependencies that you statically link with here ...	
 			}
 			);

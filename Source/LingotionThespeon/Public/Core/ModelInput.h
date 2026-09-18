@@ -120,9 +120,17 @@ struct FLingotionInputSegment
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (MultiLine = true), Category = "Lingotion Thespeon")
 	FString Text;
 
-	/** The emotion to apply to this segment. None uses the default emotion from the parent FLingotionModelInput. */
+	/** Legacy single emotion used by the current inference path. The Advanced GUI edits StartEmotion and EndEmotion instead. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lingotion Thespeon")
-	EEmotion Emotion;
+	EEmotion Emotion = EEmotion::None;
+
+	/** The emotion to apply to the start of this segment. TMap keys are emotions, values are their intensities (Sums to 1) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lingotion Thespeon")
+	TMap<EEmotion, float> StartEmotion;
+
+	/** The emotion to apply to the end of this segment. TMap keys are emotions, values are their intensities (Sums to 1) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lingotion Thespeon")
+	TMap<EEmotion, float> EndEmotion;
 
 	/** The language/dialect of this segment. Undefined uses the default language from the parent FLingotionModelInput. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lingotion Thespeon")
@@ -132,11 +140,67 @@ struct FLingotionInputSegment
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lingotion Thespeon")
 	bool bIsCustomPronounced = false;
 
-	FLingotionInputSegment() : Emotion(EEmotion::None) {}
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lingotion Thespeon")
+	float StartSpeed = 1.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lingotion Thespeon")
+	float EndSpeed = 1.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lingotion Thespeon")
+	float StartLoudness = 1.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lingotion Thespeon")
+	float EndLoudness = 1.0f;
 
-	FLingotionInputSegment(const FString& InText, EEmotion InEmotion, const FLingotionLanguage& InLanguage, bool bInIsCustomPronounced)
-	    : Text(InText), Emotion(InEmotion), Language(InLanguage), bIsCustomPronounced(bInIsCustomPronounced)
+	FLingotionInputSegment()
 	{
+		StartEmotion.Add(EEmotion::None, 1.0f);
+		EndEmotion.Add(EEmotion::None, 1.0f);
+	}
+
+	FLingotionInputSegment(
+	    const FString& InText,
+	    TMap<EEmotion, float> InStartEmotion,
+	    TMap<EEmotion, float> InEndEmotion,
+	    const FLingotionLanguage& InLanguage,
+	    bool bInIsCustomPronounced,
+	    float InStartSpeed = 1.0f,
+	    float InEndSpeed = 1.0f,
+	    float InStartLoudness = 1.0f,
+	    float InEndLoudness = 1.0f
+	)
+	    : Text(InText)
+	    , StartEmotion(InStartEmotion)
+	    , EndEmotion(InEndEmotion)
+	    , Language(InLanguage)
+	    , bIsCustomPronounced(bInIsCustomPronounced)
+	    , StartSpeed(InStartSpeed)
+	    , EndSpeed(InEndSpeed)
+	    , StartLoudness(InStartLoudness)
+	    , EndLoudness(InEndLoudness)
+	{
+	}
+
+	/** Expanded legacy constructor. Retains old behavior.*/
+	FLingotionInputSegment(
+	    const FString& InText,
+	    EEmotion InEmotion,
+	    const FLingotionLanguage& InLanguage,
+	    bool bInIsCustomPronounced,
+	    float InStartSpeed = 1.0f,
+	    float InEndSpeed = 1.0f,
+	    float InStartLoudness = 1.0f,
+	    float InEndLoudness = 1.0f
+	)
+	    : Text(InText)
+	    , Emotion(InEmotion)
+	    , Language(InLanguage)
+	    , bIsCustomPronounced(bInIsCustomPronounced)
+	    , StartSpeed(InStartSpeed)
+	    , EndSpeed(InEndSpeed)
+	    , StartLoudness(InStartLoudness)
+	    , EndLoudness(InEndLoudness)
+	{
+		StartEmotion.Reset();
+		StartEmotion.Add(InEmotion, 1.0f);
+		EndEmotion = StartEmotion;
 	}
 
 	/**

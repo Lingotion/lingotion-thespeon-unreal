@@ -4,6 +4,7 @@
 #include "Core/IO/RuntimeFileLoader.h"
 #include "Core/LingotionLogger.h"
 #include "Inference/ModuleManager.h"
+#include "Core/ManifestHandler.h"
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
@@ -94,7 +95,7 @@ bool Thespeon::Character::CharacterModule::ParseJSON(const TSharedPtr<FJsonObjec
 				double Value = 0.0;
 				if (Pair.Value->TryGetNumber(Value))
 				{
-					PhonemeToEncoderKeys.Add(Pair.Key, static_cast<int64>(Value));
+					PhonemeToEncoderKeys.Add(FString(*Pair.Key), static_cast<int64>(Value));
 				}
 			}
 		}
@@ -135,6 +136,42 @@ bool Thespeon::Character::CharacterModule::ParseJSON(const TSharedPtr<FJsonObjec
 	return true;
 }
 
+// Character modules reference language modules by an exact base_module_id that encodes the module's
+// revision, so a character built against one revision cannot find another that is imported. When the
+// requested ID is missing, fall back to any imported module serving the same language rather than
+// failing the character outright. Returns RequestedID unchanged when it is imported, when the
+// manifest is unavailable, or when no imported module serves the language at all.
+static FString ResolveImportedLanguageModuleID(const FString& Iso639_2, const FString& RequestedID)
+{
+	UManifestHandler* Manifest = UManifestHandler::Get();
+	if (!Manifest || Manifest->HasLanguageModule(RequestedID))
+	{
+		return RequestedID;
+	}
+
+	const FString FallbackID = Manifest->FindLanguageModuleIDForISO(Iso639_2);
+	if (FallbackID.IsEmpty())
+	{
+		LINGO_LOG(
+		    EVerbosityLevel::Warning,
+		    TEXT("No imported language module serves '%s'. Import a '%s' language module to use this language."),
+		    *Iso639_2,
+		    *Iso639_2
+		);
+		return RequestedID;
+	}
+
+	LINGO_LOG(
+	    EVerbosityLevel::Warning,
+	    TEXT("Language module '%s' requested for '%s' is not imported. Falling back to imported module '%s'. "
+	         "Pronunciation may differ from what this character was built against."),
+	    *RequestedID,
+	    *Iso639_2,
+	    *FallbackID
+	);
+	return FallbackID;
+}
+
 // Loads character-specific configuration from JSON:
 // 1. "phonemizer_setup.modules" → LanguageModuleIDs (iso639_2 → base_module_id mapping)
 // 2. "languages" array → LangToLangKey (FLingotionLanguage → encoder language key)
@@ -170,7 +207,7 @@ bool Thespeon::Character::CharacterModule::LoadCharacterConfiguration(const TSha
 					continue;
 				}
 
-				LanguageModuleIDs.Add(Iso639_2, ModuleId);
+				LanguageModuleIDs.Add(Iso639_2, ResolveImportedLanguageModuleID(Iso639_2, ModuleId));
 			}
 		}
 	}
@@ -250,23 +287,6 @@ bool Thespeon::Character::CharacterModule::LoadCharacterConfiguration(const TSha
 	return true;
 }
 
-// Gets all MD5s of the files in this module
-TSet<FString> Thespeon::Character::CharacterModule::GetAllWorkloadMD5s() const
-{
-	TSet<FString> AllFileNames;
-
-	// Collect MD5s from internal file mappings
-	for (const auto& FilePair : InternalFileMappings)
-	{
-		if (FilePair.Key != TEXT("metagraph")) // Exclude metagraph from workload MD5s as it's not a runtime workload file
-		{
-			AllFileNames.Add(FilePair.Value.FileName);
-		}
-	}
-
-	return AllFileNames;
-}
-
 // Encodes a phoneme string into encoder IDs using PhonemeToEncoderKeys.
 // First attempts to match the entire string as a single vocabulary entry (e.g., multi-char phonemes).
 // Falls back to character-by-character encoding if no full-string match is found.
@@ -330,33 +350,6 @@ int64 Thespeon::Character::CharacterModule::GetCharacterKey() const
 		LINGO_LOG(EVerbosityLevel::Error, TEXT("No character key found in the character module"));
 	}
 	return CharacterKey;
-}
-
-// Checks whether all model files in this character module are registered as workloads
-// on the given backend. Used to determine if the module is fully loaded.
-bool Thespeon::Character::CharacterModule::IsIncludedIn(const TSet<FString>& WorkloadIDs, EBackendType BackendType) const
-{
-	// Check if all potential workloads on the given backend in this module are present in the provided ID set
-	for (const auto& FilePair : InternalFileMappings)
-	{
-		FString WorkloadID;
-		if (!Thespeon::Core::TryGetRuntimeWorkloadID(FilePair.Value.FileName, BackendType, WorkloadID))
-		{
-			LINGO_LOG(
-			    EVerbosityLevel::Error,
-			    TEXT("Could not get WorkloadID for file MD5 '%s' on backend '%s'."),
-			    *FilePair.Value.FileName,
-			    *UEnum::GetValueAsString(BackendType)
-			);
-			return false;
-		}
-		if (FilePair.Key != TEXT("metagraph") && !WorkloadIDs.Contains(WorkloadID))
-		{
-			return false;
-		}
-		// --- IGNORE ---
-	}
-	return true;
 }
 
 TArray<FLingotionLanguage> Thespeon::Character::CharacterModule::GetSupportedLanguages() const

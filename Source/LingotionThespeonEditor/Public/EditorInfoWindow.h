@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Module.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "EditorModuleDeleter.h"
 
@@ -85,7 +86,8 @@ class FEditorInfoWindow : public TSharedFromThis<FEditorInfoWindow>
 	 * @param Name - Module name
 	 * @param JsonPath - JSON path
 	 * @param InfoText - Information text (actor name or language name)
-	 * @param InfoText2 - Secondary information text (quality or empty)
+	 * @param InfoText2 - Secondary information text (size tier or empty)
+	 * @param Version - Semantic module version
 	 * @param bIsCharacterModule - Whether this is a character module
 	 * @return Reply indicating how the event was handled
 	 */
@@ -97,6 +99,7 @@ class FEditorInfoWindow : public TSharedFromThis<FEditorInfoWindow>
 	    FString JsonPath,
 	    FString InfoText,
 	    FString InfoText2,
+	    Thespeon::Core::FVersion Version,
 	    bool bIsCharacterModule
 	);
 

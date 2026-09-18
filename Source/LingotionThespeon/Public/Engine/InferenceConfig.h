@@ -26,6 +26,20 @@ struct LINGOTIONTHESPEON_API FInferenceConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Default Configuration")
 	EBackendType BackendType;
 
+	/**
+	 * Forces every model to run on BackendType even when its metagraph node declares a preferred device.
+	 */
+	UPROPERTY(
+	    EditAnywhere,
+	    BlueprintReadWrite,
+	    Category = "Default Configuration",
+	    meta =
+	        (ToolTip =
+	             "Run every model on the selected backend even when its metagraph declares a preferred device. Models pin a device because they perform poorly or incorrectly elsewhere, so enable this only for debugging. Applies when a character is first preloaded on a backend."
+	        )
+	)
+	bool bForceRequestedBackend;
+
 	/** Seconds of audio to buffer before starting playback. Must be >= 0. */
 	UPROPERTY(EditAnywhere, Category = "Component Configuration", meta = (ClampMin = "0.0"))
 	float BufferSeconds;

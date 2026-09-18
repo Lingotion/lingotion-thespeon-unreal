@@ -78,7 +78,7 @@ bool ULookupTableManager::TryDeregisterTable(Thespeon::Language::LanguageModule*
 		LINGO_LOG(EVerbosityLevel::Warning, TEXT("Lookup table with MD5 '%s' not registered."), *MD5);
 		return false; // not registered, cancel unload
 	}
-	if (Module->LoadedBackends.Num() != 0)
+	if (Module->RegisteredWorkloads.Num() != 0)
 	{
 		LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Lookup table with MD5 '%s' still has loaded workloads."), *MD5);
 		return true; // workloads still loaded, cannot deregister but dont cancel unload

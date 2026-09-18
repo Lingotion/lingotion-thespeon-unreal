@@ -46,15 +46,24 @@ class FPreloadSession : public FRunnable
 	/** Completion callback signature. Fired on the game thread when preload finishes or is cancelled. */
 	using FOnComplete = TFunction<void(bool bSuccess, FString CharacterName, EThespeonModuleType ModuleType, EBackendType BackendType)>;
 
+	/**
+	 * @param InForceRequestedBackend When true, models run on InBackendType even if their metagraph node
+	 *                       declares a preferred device.
+	 * @param InLoadPriority Forwarded to FStreamableManager::RequestAsyncLoad. Default 0 (normal); use 100
+	 *                       (FStreamableManager::AsyncLoadHighPriority) when this preload is being run
+	 *                       inline from a synth so its asset loads jump ahead of background preloads.
+	 */
 	FPreloadSession(
 	    FString InCharacterName,
 	    EThespeonModuleType InModuleType,
 	    EBackendType InBackendType,
+	    bool InForceRequestedBackend,
 	    UInferenceWorkloadManager* InWorkloadMgr,
 	    UModuleManager* InModuleMgr,
 	    ULookupTableManager* InLookupMgr,
 	    UManifestHandler* InManifest,
-	    FOnComplete InOnComplete
+	    FOnComplete InOnComplete,
+	    int32 InLoadPriority = 0
 	);
 
 	virtual bool Init() override
@@ -91,10 +100,28 @@ class FPreloadSession : public FRunnable
 		return bFinished.load();
 	}
 
+	const FString& GetCharacterName() const
+	{
+		return CharacterName;
+	}
+	EThespeonModuleType GetModuleType() const
+	{
+		return ModuleType;
+	}
+	EBackendType GetBackendType() const
+	{
+		return BackendType;
+	}
+	bool GetForceRequestedBackend() const
+	{
+		return bForceRequestedBackend;
+	}
+
   private:
 	FString CharacterName;
 	EThespeonModuleType ModuleType;
 	EBackendType BackendType;
+	bool bForceRequestedBackend;
 
 	// Subsystem pointers — captured on game thread at construction time.
 	// Valid for the lifetime of the preload because component OnUnregister (where we join)
@@ -105,6 +132,7 @@ class FPreloadSession : public FRunnable
 	UManifestHandler* ManifestHandler;
 
 	FOnComplete OnComplete;
+	int32 LoadPriority;
 	std::atomic<bool> bStopRequested{false};
 	std::atomic<bool> bSuccess{false};
 	std::atomic<bool> bFinished{false};

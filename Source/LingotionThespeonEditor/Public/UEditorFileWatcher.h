@@ -23,6 +23,8 @@ class UEditorFileWatcher : public UEditorSubsystem
 
   private:
 	FDelegateHandle DirectoryChangedHandle;
+	/** Handle for the runtime synthesis-data signal binding. */
+	FDelegateHandle SynthDataHandle;
 	TArray<FString> CachedModuleFiles;
 	void VerifyRuntimeFiles();
 	void ProcessCharacterModule(

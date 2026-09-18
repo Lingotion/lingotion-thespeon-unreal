@@ -4,6 +4,7 @@
 
 FInferenceConfig::FInferenceConfig()
     : BackendType(EBackendType::CPU)
+    , bForceRequestedBackend(false)
     , BufferSeconds(0.5f)
     , ModuleType(EThespeonModuleType::L)
     , FallbackEmotion(EEmotion::Interest)
@@ -55,8 +56,10 @@ EBackendType FInferenceConfig::SettingToBackendType(ESettingBackendType SettingT
 FString FInferenceConfig::ToString() const
 {
 	return FString::Printf(
-	    TEXT("BackendType: %s, BufferSeconds: %.2f, ModuleType: %s, FallbackEmotion: %s, FallbackLanguage: %s, ThreadPriority: %s"),
+	    TEXT("BackendType: %s, ForceRequestedBackend: %s, BufferSeconds: %.2f, ModuleType: %s, FallbackEmotion: %s, FallbackLanguage: %s, "
+	         "ThreadPriority: %s"),
 	    *UEnum::GetValueAsString(BackendType),
+	    bForceRequestedBackend ? TEXT("true") : TEXT("false"),
 	    BufferSeconds,
 	    *UEnum::GetValueAsString(ModuleType),
 	    *UEnum::GetValueAsString(FallbackEmotion),

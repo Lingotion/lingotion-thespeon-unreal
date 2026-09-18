@@ -41,11 +41,11 @@ class FSessionWorkloadCache
 		{
 			return; // Subsystem already destroyed (e.g. PIE shutdown) — workloads drop naturally
 		}
-		for (auto& [MD5, Entry] : AcquiredWorkloads)
+		for (auto& [WorkloadID, Workload] : AcquiredWorkloads)
 		{
-			if (Entry.Workload.IsValid())
+			if (Workload.IsValid())
 			{
-				Mgr->ReleaseWorkload(Entry.WorkloadID, MoveTemp(Entry.Workload));
+				Mgr->ReleaseWorkload(WorkloadID, MoveTemp(Workload));
 			}
 		}
 		AcquiredWorkloads.Empty();
@@ -57,15 +57,29 @@ class FSessionWorkloadCache
 	FSessionWorkloadCache(FSessionWorkloadCache&&) = delete;
 	FSessionWorkloadCache& operator=(FSessionWorkloadCache&&) = delete;
 
-	/** Gets an exclusive workload for the given model MD5.
-	 *  First call per MD5: acquires from pool. Subsequent calls: returns cached instance.
+	/** Gets an exclusive workload for the given model MD5 on the given backend.
+	 *  First call per workload: acquires from pool. Subsequent calls: returns the cached instance.
 	 *  @param MD5 The model MD5 hash.
+	 *  @param EffectiveBackend The backend this model must run on, as resolved by
+	 *         Module::ResolveNodeBackend — a metagraph device pin may make it differ from the
+	 *         session's requested backend. Pass EBackendType::None to use the session's backend.
 	 *  @return An exclusive workload instance, or nullptr on failure. */
-	TSharedPtr<InferenceWorkload, ESPMode::ThreadSafe> GetWorkload(const FString& MD5)
+	TSharedPtr<InferenceWorkload, ESPMode::ThreadSafe> GetWorkload(const FString& MD5, EBackendType EffectiveBackend = EBackendType::None)
 	{
-		if (FAcquiredEntry* Found = AcquiredWorkloads.Find(MD5))
+		const EBackendType ResolvedBackend = EffectiveBackend != EBackendType::None ? EffectiveBackend : Backend;
+
+		// Keyed by WorkloadID rather than MD5: two nodes can share one MD5 while declaring different
+		// devices, and those are separate pools holding separate instances.
+		FString WorkloadID;
+		if (!Thespeon::Core::TryGetRuntimeWorkloadID(MD5, ResolvedBackend, WorkloadID))
 		{
-			return Found->Workload;
+			LINGO_LOG(EVerbosityLevel::Error, TEXT("FSessionWorkloadCache: WorkloadID resolution failed for '%s'"), *MD5);
+			return nullptr;
+		}
+
+		if (TSharedPtr<InferenceWorkload, ESPMode::ThreadSafe>* Found = AcquiredWorkloads.Find(WorkloadID))
+		{
+			return *Found;
 		}
 
 		UInferenceWorkloadManager* Mgr = Manager.Get();
@@ -74,19 +88,10 @@ class FSessionWorkloadCache
 			return nullptr;
 		}
 
-		// Resolve MD5 → WorkloadID once; AcquireWorkload resolves again internally,
-		// but we store the resolved ID here for ReleaseWorkload in the destructor.
-		FString WorkloadID;
-		if (!Thespeon::Core::TryGetRuntimeWorkloadID(MD5, Backend, WorkloadID))
-		{
-			LINGO_LOG(EVerbosityLevel::Error, TEXT("FSessionWorkloadCache: WorkloadID resolution failed for '%s'"), *MD5);
-			return nullptr;
-		}
-
-		TSharedPtr<InferenceWorkload, ESPMode::ThreadSafe> Workload = Mgr->AcquireWorkload(MD5, Backend);
+		TSharedPtr<InferenceWorkload, ESPMode::ThreadSafe> Workload = Mgr->AcquireWorkload(MD5, ResolvedBackend);
 		if (Workload.IsValid())
 		{
-			AcquiredWorkloads.Add(MD5, {WorkloadID, Workload});
+			AcquiredWorkloads.Add(MoveTemp(WorkloadID), Workload);
 		}
 		return Workload;
 	}
@@ -96,15 +101,9 @@ class FSessionWorkloadCache
 	TWeakObjectPtr<UInferenceWorkloadManager> Manager;
 	EBackendType Backend = EBackendType::None;
 
-	/** Entry in the per-session cache: stores both the resolved WorkloadID (for release) and the workload. */
-	struct FAcquiredEntry
-	{
-		FString WorkloadID;
-		TSharedPtr<InferenceWorkload, ESPMode::ThreadSafe> Workload;
-	};
-
-	/** Workloads acquired during this session, keyed by MD5. */
-	TMap<FString, FAcquiredEntry> AcquiredWorkloads;
+	/** Workloads acquired during this session, keyed by workload ID — which is also the key
+	 *  ReleaseWorkload needs, and which distinguishes one MD5 pooled on two different backends. */
+	TMap<FString, TSharedPtr<InferenceWorkload, ESPMode::ThreadSafe>> AcquiredWorkloads;
 };
 
 } // namespace Inference

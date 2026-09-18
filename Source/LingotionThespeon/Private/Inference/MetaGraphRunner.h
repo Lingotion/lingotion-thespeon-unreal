@@ -8,15 +8,15 @@
 #include "Misc/TVariant.h"
 #include "InferenceWorkload.h"
 #include "SessionTensorPool.h"
-#include "meta_graph.pb.h"
+#include "Core/meta_graph.pb.h"
 #include "InferenceSession.h"
 #include "Core/ThespeonDataPacket.h"
 #include "SessionWorkloadCache.h"
 namespace Thespeon
 {
-namespace Character
+namespace Core
 {
-class CharacterModule;
+class Module;
 }
 } // namespace Thespeon
 
@@ -35,9 +35,13 @@ using FShouldStopFn = TUniqueFunction<bool const()>;
 class FMetaGraphRunner
 {
   public:
+	/**
+	 * @param InModule Module whose file mappings resolve this graph's node ids to workloads —
+	 *        a CharacterModule for the voice graph, a LanguageModule for the phonemizer graph.
+	 */
 	FMetaGraphRunner(
 	    SessionTensorPool& InTensorPool,
-	    Thespeon::Character::CharacterModule* InCharacterModule,
+	    Thespeon::Core::Module* InModule,
 	    Thespeon::Inference::FSessionWorkloadCache* InWorkloadCache,
 	    const FInferenceConfig& InConfig,
 	    Thespeon::Inference::FPostPacketFn InCallback,
@@ -46,17 +50,14 @@ class FMetaGraphRunner
 
 	/**
 	 * @brief Runs a pre-loaded protobuf meta graph to completion.
+	 *
+	 * The graph is treated as strictly read-only, so a single parsed graph (see
+	 * Module::GetMetaGraph) may back concurrent sessions.
+	 *
 	 * @param Graph The MetaGraph protobuf to execute.
-	 * @param OutSamples Output array populated with synthesized audio samples.
 	 * @return False on any error.
 	 */
-	bool Run(const metaonnx::MetaGraph& Graph, TArray<float>& OutSamples);
-
-	/** @brief Loads a MetaGraph protobuf definition from disk.
-	 *  @param FilePath Path to the protobuf file.
-	 *  @param OutGraph Output MetaGraph populated from the file.
-	 *  @return True if loading succeeded. */
-	static bool LoadMetaGraphFromDisk(const FString& FilePath, metaonnx::MetaGraph& OutGraph);
+	bool Run(const metaonnx::MetaGraph& Graph);
 
   private:
 	// Host variables can store:
@@ -67,31 +68,39 @@ class FMetaGraphRunner
 	using FHostValue = TVariant<int64, float, bool, ModelIOData, TArray<float>, TArray<int64>, FString>;
 	using FHostMap = TMap<FString, FHostValue>;
 
+	/** @brief Validates TensorPool contents against Graph.inputs (presence, dtype, dims,
+	 *  and cross-input symbolic dim consistency), then fills in default values for
+	 *  missing optional inputs.
+	 *  @param Graph The MetaGraph whose declared input contract to validate against.
+	 *  @return False if any declared input is missing, has the wrong dtype, or has
+	 *  mismatched dimensions. */
+	bool ValidateAndFillInputs(const metaonnx::MetaGraph& Graph);
+
 	// HostAction / Condition / Node / Loop / GraphItem
 	void EvalHostAction(const metaonnx::HostAction& Action, FHostMap& Host);
 	bool RunCondition(const metaonnx::Condition& Cond, FHostMap& Host) const;
 
 	bool RunNode(
 	    const metaonnx::Node& Node,
-	    const TMap<FString, metaonnx::Node*>& Nodes,
-	    const TMap<FString, metaonnx::Loop*>& Loops,
-	    const TMap<FString, metaonnx::Condition*>& Conds,
+	    const TMap<FString, const metaonnx::Node*>& Nodes,
+	    const TMap<FString, const metaonnx::Loop*>& Loops,
+	    const TMap<FString, const metaonnx::Condition*>& Conds,
 	    FHostMap& Host
 	);
 
 	bool RunLoop(
 	    const metaonnx::Loop& Loop,
-	    const TMap<FString, metaonnx::Node*>& Nodes,
-	    const TMap<FString, metaonnx::Loop*>& Loops,
-	    const TMap<FString, metaonnx::Condition*>& Conds,
+	    const TMap<FString, const metaonnx::Node*>& Nodes,
+	    const TMap<FString, const metaonnx::Loop*>& Loops,
+	    const TMap<FString, const metaonnx::Condition*>& Conds,
 	    FHostMap& Host
 	);
 
 	bool ExecuteGraphItem(
 	    const metaonnx::GraphItem& Item,
-	    const TMap<FString, metaonnx::Node*>& Nodes,
-	    const TMap<FString, metaonnx::Loop*>& Loops,
-	    const TMap<FString, metaonnx::Condition*>& Conds,
+	    const TMap<FString, const metaonnx::Node*>& Nodes,
+	    const TMap<FString, const metaonnx::Loop*>& Loops,
+	    const TMap<FString, const metaonnx::Condition*>& Conds,
 	    FHostMap& Host
 	);
 
@@ -107,10 +116,16 @@ class FMetaGraphRunner
 	static int64 NumElements(const TArray<int64>& Dims);
 	static UE::NNE::FTensorShape MakeShapeFromDims(const TArray<int64>& Dims);
 
+	// Builds a tensor from a TensorCreate spec: resolves static/symbolic/runtime dims,
+	// then fills it per the spec's Fill mode. Returns null on failure.
+	TUniquePtr<ModelIOData> BuildTensorCreateArray(const metaonnx::TensorCreate& A, const FHostMap& Host);
+
   private:
 	SessionTensorPool& TensorPool;
 	FSessionWorkloadCache* WorkloadCache = nullptr;
-	Thespeon::Character::CharacterModule* CharacterModule = nullptr;
+	// Resolves node ids to workload IDs. Base-class pointer so either a character or a
+	// language module can back the graph; only GetInternalModelID is used.
+	Thespeon::Core::Module* OwningModule = nullptr;
 	const FInferenceConfig& Config;
 	FPostPacketFn PostPacketCallback;
 	FShouldStopFn ExternStopSignal;

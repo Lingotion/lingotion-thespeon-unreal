@@ -14,6 +14,9 @@
 #include "Core/LingotionLogger.h"
 #include "Core/IO/RuntimeFileLoader.h"
 #include "Core/ManifestHandler.h"
+#include "Inference/ThespeonEditorSignals.h"
+#include "EditorDataCache.h"
+#include "EditorLicenseKeyValidator.h"
 
 using Thespeon::Core::IO::RuntimeFileLoader;
 
@@ -174,16 +177,32 @@ void UEditorFileWatcher::ProcessCharacterModule(
     const TSharedPtr<FJsonObject>& Contents, TSet<FString>& Names, const FString& File, TSharedRef<FJsonObject>& CharacterModules
 )
 {
+	TSharedRef<FJsonObject> ModuleResultObj = MakeShared<FJsonObject>();
+	UManifestHandler* ManifestHandler = UManifestHandler::Get();
+	Thespeon::Core::FVersion Version = ManifestHandler->ReadVersionObject(Contents);
+	if (!Version.IsValid())
+	{
+		LINGO_LOG(
+		    EVerbosityLevel::Error,
+		    TEXT(
+		        "Lingotion import rejected %s: module config has no valid 'version' field. Expected an object with integer 'major', 'minor', and 'patch' fields. Re-download the module from the Lingotion portal."
+		    ),
+		    *FPaths::GetCleanFilename(File)
+		);
+		return;
+	}
+
+	ModuleResultObj->SetObjectField(TEXT("version"), Contents->GetObjectField(TEXT("version")));
+
 	FString Name = Contents->GetStringField(TEXT("name"));
 	Names.Add(Name);
 	FString Identifier = Contents->GetStringField(TEXTVIEW("source_id"));
 
-	TSharedRef<FJsonObject> ModuleResultObj = MakeShared<FJsonObject>();
 	ModuleResultObj->SetStringField(TEXT("name"), Name);
 	ModuleResultObj->SetStringField(TEXT("jsonpath"), FPaths::GetCleanFilename(File));
-	FString QualityLevel = Contents->GetObjectField(TEXT("tags"))->GetStringField(TEXT("module_type"));
+	const FString ModuleTypeTag = Contents->GetObjectField(TEXT("tags"))->GetStringField(TEXT("module_type"));
 
-	ModuleResultObj->SetStringField(TEXT("quality"), QualityLevel);
+	ModuleResultObj->SetStringField(TEXT("size"), UManifestHandler::GetModuleSizeString(ModuleTypeTag, Name));
 
 	// Create languages list for module
 	TArray<TSharedPtr<FJsonValue>> Languages = Contents->GetArrayField(TEXTVIEW("languages"));
@@ -219,11 +238,26 @@ void UEditorFileWatcher::ProcessLanguageModule(
     const TSharedPtr<FJsonObject>& Contents, TSet<FString>& Names, const FString& File, TSharedRef<FJsonObject>& LanguageModules
 )
 {
+	TSharedRef<FJsonObject> ModuleResultObj = MakeShared<FJsonObject>();
+	UManifestHandler* ManifestHandler = UManifestHandler::Get();
+	Thespeon::Core::FVersion Version = ManifestHandler->ReadVersionObject(Contents);
+	if (!Version.IsValid())
+	{
+		LINGO_LOG(
+		    EVerbosityLevel::Error,
+		    TEXT(
+		        "Lingotion import rejected %s: module config has no valid 'version' field. Expected an object with integer 'major', 'minor', and 'patch' fields. Re-download the module from the Lingotion portal."
+		    ),
+		    *FPaths::GetCleanFilename(File)
+		);
+		return;
+	}
+	ModuleResultObj->SetObjectField(TEXT("version"), Contents->GetObjectField(TEXT("version")));
+
 	FString Name = Contents->GetStringField(TEXT("name"));
 	Names.Add(Name);
 	FString Identifier = Contents->GetStringField(TEXT("base_module_id"));
 
-	TSharedRef<FJsonObject> ModuleResultObj = MakeShared<FJsonObject>();
 	ModuleResultObj->SetStringField(TEXT("name"), Name);
 	ModuleResultObj->SetStringField(TEXT("jsonpath"), FPaths::GetCleanFilename(File));
 
@@ -273,6 +307,8 @@ void UEditorFileWatcher::Initialize(FSubsystemCollectionBase& Collection)
 	Super::Initialize(Collection);
 
 	UpdateMappingsInfo();
+	SynthDataHandle = Thespeon::Inference::FThespeonEditorSignals::OnSynthesisDataSignal.AddStatic(&FEditorDataCache::AddToCache);
+	FEditorLicenseKeyValidator::ValidateLicenseAsync(FEditorLicenseKeyValidator::FOnLicenseValidationResult());
 
 	// find watcher
 	static FDirectoryWatcherModule& DirectoryWatcherModule = FModuleManager::LoadModuleChecked<FDirectoryWatcherModule>(TEXT("DirectoryWatcher"));
@@ -293,6 +329,13 @@ void UEditorFileWatcher::Initialize(FSubsystemCollectionBase& Collection)
 
 void UEditorFileWatcher::Deinitialize()
 {
+	// Unbind the synthesis-data handler.
+	if (SynthDataHandle.IsValid())
+	{
+		Thespeon::Inference::FThespeonEditorSignals::OnSynthesisDataSignal.Remove(SynthDataHandle);
+		SynthDataHandle.Reset();
+	}
+
 	// Unregister the directory watcher callback if the handle is valid
 	if (_watcher && DirectoryChangedHandle.IsValid())
 	{

@@ -6,7 +6,7 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 
-#include "Character/CharacterModule.h"
+#include "Core/Module.h"
 #include "Utils/WavSaver.h"
 #include "SymExprParser.h"
 
@@ -14,7 +14,7 @@ using namespace Thespeon::Inference;
 
 FMetaGraphRunner::FMetaGraphRunner(
     SessionTensorPool& InTensorPool,
-    Thespeon::Character::CharacterModule* InCharacterModule,
+    Thespeon::Core::Module* InModule,
     Thespeon::Inference::FSessionWorkloadCache* InWorkloadCache,
     const FInferenceConfig& InConfig,
     Thespeon::Inference::FPostPacketFn InCallback,
@@ -22,7 +22,7 @@ FMetaGraphRunner::FMetaGraphRunner(
 )
     : TensorPool(InTensorPool)
     , WorkloadCache(InWorkloadCache)
-    , CharacterModule(InCharacterModule)
+    , OwningModule(InModule)
     , Config(InConfig)
     , PostPacketCallback(MoveTemp(InCallback))
     , ExternStopSignal(MoveTemp(InStopSignal))
@@ -116,14 +116,19 @@ UE::NNE::FTensorShape FMetaGraphRunner::MakeShapeFromDims(const TArray<int64>& D
 
 TSharedPtr<InferenceWorkload, ESPMode::ThreadSafe> FMetaGraphRunner::ResolveWorkloadForNode(const metaonnx::Node& Node) const
 {
-	if (!WorkloadCache || !CharacterModule)
+	if (!WorkloadCache || !OwningModule)
 	{
 		return nullptr;
 	}
 
 	const FString LogicalName = ToFString(Node.id());
-	auto InternalID = CharacterModule->GetInternalModelID(*LogicalName);
-	return WorkloadCache->GetWorkload(InternalID);
+	auto InternalID = OwningModule->GetInternalModelID(*LogicalName);
+
+	// The node may declare a device other than the session's backend, and that choice is part of the
+	// workload's identity. Resolving it through the owning module — the same call registration made —
+	// is what makes this land on the pool the model was actually built in.
+	const EBackendType EffectiveBackend = OwningModule->ResolveNodeBackend(LogicalName, Config.BackendType, Config.bForceRequestedBackend);
+	return WorkloadCache->GetWorkload(InternalID, EffectiveBackend);
 }
 
 // Convert ScalarLiteral -> FHostValue.
@@ -216,6 +221,83 @@ bool FMetaGraphRunner::ResolveValueRef(
 	}
 }
 
+// Builds a tensor from a TensorCreate spec: resolves each dim (static size, or a
+// symbolic/runtime expression evaluated against Host and TensorPool), then fills it
+// per the spec's Fill mode. Returns null on failure.
+TUniquePtr<ModelIOData> FMetaGraphRunner::BuildTensorCreateArray(const metaonnx::TensorCreate& A, const FHostMap& Host)
+{
+	TArray<int64> Dims;
+	Dims.Reserve(A.dims_size());
+	for (int i = 0; i < A.dims_size(); ++i)
+	{
+		const metaonnx::DimEntry& Dim = A.dims(i);
+		if (Dim.type() == metaonnx::DimEntry_DimType_DIM_STATIC)
+		{
+			Dims.Add(static_cast<int64>(Dim.size()));
+			continue;
+		}
+
+		uint32 Result = 0;
+		TMap<FString, FSymExprParser::VarDictEntry> EmptyVarDict;
+		if (!FSymExprParser::Evaluate(ToFString(Dim.expression()), EmptyVarDict, Host, TensorPool, Result))
+		{
+			LINGO_LOG(EVerbosityLevel::Error, TEXT("TensorCreate: failed to evaluate dim expression '%s'"), *ToFString(Dim.expression()));
+			return nullptr;
+		}
+		Dims.Add(static_cast<int64>(Result));
+	}
+	if (Dims.Num() == 0)
+	{
+		Dims.Add(1);
+	}
+
+	const UE::NNE::FTensorShape Shape = MakeShapeFromDims(Dims);
+	const std::string& DTypeStr = A.dtype();
+
+	// Determine fill value
+	const bool bOnes = (A.fill() == metaonnx::TensorCreate_Fill_ONES);
+	const bool bZeros = (A.fill() == metaonnx::TensorCreate_Fill_ZEROS);
+	const bool bValue = (A.fill() == metaonnx::TensorCreate_Fill_VALUE);
+
+	if (!(bOnes || bZeros || bValue))
+	{
+		LINGO_LOG(EVerbosityLevel::Error, TEXT("TensorCreate: unknown fill %d"), (int32)A.fill());
+		return nullptr;
+	}
+
+	FHostValue FillValue;
+	if (bValue)
+	{
+		if (!A.has_value() || !ScalarLiteralToHostValue(A.value(), FillValue))
+		{
+			LINGO_LOG(EVerbosityLevel::Error, TEXT("TensorCreate: VALUE fill requires scalar value"));
+			return nullptr;
+		}
+	}
+
+	if (DTypeStr == "int64")
+	{
+		int64 Val = bOnes ? 1 : 0;
+		if (bValue)
+		{
+			Val = static_cast<int64>(HostToFloat(FillValue));
+		}
+		return MakeUnique<ModelIOData>(ModelIOData::Make<int64>(Shape, Val));
+	}
+	else if (DTypeStr == "float32")
+	{
+		float Val = bOnes ? 1.0f : 0.0f;
+		if (bValue)
+		{
+			Val = HostToFloat(FillValue);
+		}
+		return MakeUnique<ModelIOData>(ModelIOData::Make<float>(Shape, Val));
+	}
+
+	LINGO_LOG(EVerbosityLevel::Error, TEXT("TensorCreate: unsupported dtype %s"), *FString(DTypeStr.c_str()));
+	return nullptr;
+}
+
 // Evaluates a host-side action from the meta graph. Supports: tensor<->host transfers,
 // tensor copy/rename/create, host variable set/remove, binary arithmetic, and callbacks
 // (which post audio/trigger data packets back to the game thread).
@@ -274,6 +356,22 @@ void FMetaGraphRunner::EvalHostAction(const metaonnx::HostAction& Action, FHostM
 				TArray<int64> Arr{*B ? 1 : 0};
 				NewTensor = MakeUnique<ModelIOData>(ModelIOData::MakeFromArray<int64>(UE::NNE::FTensorShape::Make({1}), Arr));
 			}
+			// Non-scalar host vars: a tensor parked on the host by tensor_to_host goes back
+			// verbatim (shape and dtype preserved); a plain array becomes a 1-D tensor.
+			else if (ModelIOData* T = SrcVal->TryGet<ModelIOData>())
+			{
+				NewTensor = MakeUnique<ModelIOData>(*T);
+			}
+			else if (TArray<float>* FloatArr = SrcVal->TryGet<TArray<float>>())
+			{
+				const UE::NNE::FTensorShape Shape = UE::NNE::FTensorShape::Make({static_cast<uint32>(FloatArr->Num())});
+				NewTensor = MakeUnique<ModelIOData>(ModelIOData::MakeFromArray<float>(Shape, *FloatArr));
+			}
+			else if (TArray<int64>* IntArr = SrcVal->TryGet<TArray<int64>>())
+			{
+				const UE::NNE::FTensorShape Shape = UE::NNE::FTensorShape::Make({static_cast<uint32>(IntArr->Num())});
+				NewTensor = MakeUnique<ModelIOData>(ModelIOData::MakeFromArray<int64>(Shape, *IntArr));
+			}
 			else
 			{
 				LINGO_LOG(EVerbosityLevel::Error, TEXT("HostToTensor: unsupported host type for %s"), *Src);
@@ -303,6 +401,11 @@ void FMetaGraphRunner::EvalHostAction(const metaonnx::HostAction& Action, FHostM
 
 		case Case::kTensorRename:
 		{
+			// NOTE: this is a move, not an alias — the source name is gone afterwards. The
+			// reference Python runner does `tensors[dest] = tensors[src]`, which leaves the
+			// source readable, because a dict holds references while this pool owns each
+			// tensor via TUniquePtr. A graph that reads a renamed-away source works there and
+			// fails here, so treat a renamed source as dead: read the destination instead.
 			const auto& A = Action.tensor_rename();
 			const FString Dest = ToFString(A.dest_tensor());
 			const FString Src = ToFString(A.src_tensor());
@@ -514,65 +617,14 @@ void FMetaGraphRunner::EvalHostAction(const metaonnx::HostAction& Action, FHostM
 			const auto& A = Action.tensor_create();
 			const FString Dest = ToFString(A.dest_tensor().name());
 
-			TArray<int64> Dims;
-			Dims.Reserve(A.dims_literal_size());
-			for (int i = 0; i < A.dims_literal_size(); ++i)
+			TUniquePtr<ModelIOData> NewTensor = BuildTensorCreateArray(A, Host);
+			if (!NewTensor)
 			{
-				Dims.Add(static_cast<int64>(A.dims_literal(i)));
-			}
-			if (Dims.Num() == 0)
-			{
-				Dims.Add(1);
-			}
-
-			const UE::NNE::FTensorShape Shape = MakeShapeFromDims(Dims);
-			const std::string& DTypeStr = A.dtype();
-
-			// Determine fill value
-			const bool bOnes = (A.fill() == metaonnx::TensorCreate_Fill_ONES);
-			const bool bZeros = (A.fill() == metaonnx::TensorCreate_Fill_ZEROS);
-			const bool bValue = (A.fill() == metaonnx::TensorCreate_Fill_VALUE);
-
-			if (!(bOnes || bZeros || bValue))
-			{
-				LINGO_LOG(EVerbosityLevel::Error, TEXT("TensorCreate: unknown fill %d"), (int32)A.fill());
+				LINGO_LOG(EVerbosityLevel::Error, TEXT("TensorCreate: failed to build tensor for %s"), *Dest);
 				return;
 			}
 
-			FHostValue FillValue;
-			if (bValue)
-			{
-				if (!A.has_value() || !ScalarLiteralToHostValue(A.value(), FillValue))
-				{
-					LINGO_LOG(EVerbosityLevel::Error, TEXT("TensorCreate: VALUE fill requires scalar value"));
-					return;
-				}
-			}
-
-			if (DTypeStr == "int64")
-			{
-				int64 Val = bOnes ? 1 : 0;
-				if (bValue)
-				{
-					Val = static_cast<int64>(HostToFloat(FillValue));
-				}
-				TensorPool.SetTensor(Dest, MakeUnique<ModelIOData>(ModelIOData::Make<int64>(Shape, Val)));
-			}
-			else if (DTypeStr == "float32")
-			{
-				float Val = bOnes ? 1.0f : 0.0f;
-				if (bValue)
-				{
-					Val = HostToFloat(FillValue);
-				}
-				TensorPool.SetTensor(Dest, MakeUnique<ModelIOData>(ModelIOData::Make<float>(Shape, Val)));
-			}
-			else
-			{
-				LINGO_LOG(EVerbosityLevel::Error, TEXT("TensorCreate: unsupported dtype %s"), *FString(DTypeStr.c_str()));
-				return;
-			}
-
+			TensorPool.SetTensor(Dest, MoveTemp(NewTensor));
 			return;
 		}
 
@@ -653,9 +705,9 @@ bool FMetaGraphRunner::RunCondition(const metaonnx::Condition& Cond, FHostMap& H
 // binds input tensors from the pool, invokes inference, and runs post-actions.
 bool FMetaGraphRunner::RunNode(
     const metaonnx::Node& Node,
-    const TMap<FString, metaonnx::Node*>& Nodes,
-    const TMap<FString, metaonnx::Loop*>& Loops,
-    const TMap<FString, metaonnx::Condition*>& Conds,
+    const TMap<FString, const metaonnx::Node*>& Nodes,
+    const TMap<FString, const metaonnx::Loop*>& Loops,
+    const TMap<FString, const metaonnx::Condition*>& Conds,
     FHostMap& Host
 )
 {
@@ -687,20 +739,51 @@ bool FMetaGraphRunner::RunNode(
 			}
 		}
 
+		const ModelIOData* SrcTensor = nullptr;
+		if (!TensorPool.TryGetTensor(TensorName, SrcTensor) || !SrcTensor)
+		{
+			if (!Ib.is_optional())
+			{
+				LINGO_LOG(
+				    EVerbosityLevel::Error, TEXT("Node %s: missing tensor %s for binding to input %s"), *ToFString(Node.id()), *TensorName, *InputName
+				);
+				return false;
+			}
+
+			if (!Ib.has_default_value())
+			{
+				LINGO_LOG(EVerbosityLevel::Error, TEXT("Node %s: optional input %s has no default_value"), *ToFString(Node.id()), *InputName);
+				return false;
+			}
+
+			TUniquePtr<ModelIOData> DefaultTensor = BuildTensorCreateArray(Ib.default_value(), Host);
+			if (!DefaultTensor)
+			{
+				LINGO_LOG(
+				    EVerbosityLevel::Error, TEXT("Node %s: failed to build default value for optional input %s"), *ToFString(Node.id()), *InputName
+				);
+				return false;
+			}
+
+			TensorPool.SetTensor(TensorName, MoveTemp(DefaultTensor));
+			if (!TensorPool.TryGetTensor(TensorName, SrcTensor) || !SrcTensor)
+			{
+				LINGO_LOG(
+				    EVerbosityLevel::Error,
+				    TEXT("Node %s: default value for optional input %s did not land in the tensor pool"),
+				    *ToFString(Node.id()),
+				    *InputName
+				);
+				return false;
+			}
+		}
+
 		if (InputName == TensorName)
 		{
 			continue;
 		}
 
-		const ModelIOData* SrcTensor = nullptr;
-		if (!TensorPool.TryGetTensor(TensorName, SrcTensor) || !SrcTensor)
-		{
-			LINGO_LOG(
-			    EVerbosityLevel::Error, TEXT("Node %s: missing tensor %s for binding to input %s"), *ToFString(Node.id()), *TensorName, *InputName
-			);
-			return false;
-		}
-
+		LINGO_LOG(EVerbosityLevel::Debug, TEXT("%s: %s"), *ToFString(Node.id()), *TensorName);
 		TensorPool.SetTensor(InputName, ModelIOData(*SrcTensor));
 	}
 
@@ -728,7 +811,11 @@ bool FMetaGraphRunner::RunNode(
 			if (dim.type() == metaonnx::DimEntry_DimType_DIM_SYMBOLIC || dim.type() == metaonnx::DimEntry_DimType_DIM_RUNTIME)
 			{
 				FString expression = ToFString(dim.expression());
-				uint32 Result;
+				// Initialize to 0 so a failed resolve can never inject uninitialized stack memory
+				// into the output shape (mirrors BuildTensorCreateArray above). A DIM_RUNTIME dim
+				// (e.g. the decoder's data-dependent "time") legitimately can't be resolved here;
+				// in that case 0 is a sentinel and Infer() falls back to the runtime-resolved shape.
+				uint32 Result = 0;
 				if (!FSymExprParser::Evaluate(expression, SymDict, Host, TensorPool, Result))
 				{
 					LINGO_LOG(EVerbosityLevel::Debug, TEXT("Failed to parse symbolic dimension: %s"), *expression);
@@ -761,9 +848,9 @@ bool FMetaGraphRunner::RunNode(
 
 bool FMetaGraphRunner::RunLoop(
     const metaonnx::Loop& Loop,
-    const TMap<FString, metaonnx::Node*>& Nodes,
-    const TMap<FString, metaonnx::Loop*>& Loops,
-    const TMap<FString, metaonnx::Condition*>& Conds,
+    const TMap<FString, const metaonnx::Node*>& Nodes,
+    const TMap<FString, const metaonnx::Loop*>& Loops,
+    const TMap<FString, const metaonnx::Condition*>& Conds,
     FHostMap& Host
 )
 {
@@ -775,8 +862,8 @@ bool FMetaGraphRunner::RunLoop(
 	IterValue.Set<int64>(0);
 	Host.Add(IterVarName, IterValue);
 
-	metaonnx::Condition* Cond = nullptr;
-	if (metaonnx::Condition* const* Found = Conds.Find(ToFString(Loop.condition_id())))
+	const metaonnx::Condition* Cond = nullptr;
+	if (const metaonnx::Condition* const* Found = Conds.Find(ToFString(Loop.condition_id())))
 	{
 		Cond = *Found;
 	}
@@ -819,9 +906,9 @@ bool FMetaGraphRunner::RunLoop(
 // Dispatches a single graph item by type. Checks for cancellation before each item.
 bool FMetaGraphRunner::ExecuteGraphItem(
     const metaonnx::GraphItem& Item,
-    const TMap<FString, metaonnx::Node*>& Nodes,
-    const TMap<FString, metaonnx::Loop*>& Loops,
-    const TMap<FString, metaonnx::Condition*>& Conds,
+    const TMap<FString, const metaonnx::Node*>& Nodes,
+    const TMap<FString, const metaonnx::Loop*>& Loops,
+    const TMap<FString, const metaonnx::Condition*>& Conds,
     FHostMap& Host
 )
 {
@@ -834,7 +921,7 @@ bool FMetaGraphRunner::ExecuteGraphItem(
 	if (Item.has_node_id())
 	{
 		const FString NodeId = ToFString(Item.node_id());
-		metaonnx::Node* const* NodePtr = Nodes.Find(NodeId);
+		const metaonnx::Node* const* NodePtr = Nodes.Find(NodeId);
 		if (!NodePtr)
 		{
 			LINGO_LOG(EVerbosityLevel::Error, TEXT("GraphItem: unknown node_id %s"), *NodeId);
@@ -852,7 +939,7 @@ bool FMetaGraphRunner::ExecuteGraphItem(
 	if (Item.has_loop_id())
 	{
 		const FString LoopId = ToFString(Item.loop_id());
-		metaonnx::Loop* const* LoopPtr = Loops.Find(LoopId);
+		const metaonnx::Loop* const* LoopPtr = Loops.Find(LoopId);
 		if (!LoopPtr)
 		{
 			LINGO_LOG(EVerbosityLevel::Error, TEXT("GraphItem: unknown loop_id %s"), *LoopId);
@@ -866,7 +953,7 @@ bool FMetaGraphRunner::ExecuteGraphItem(
 		const auto& Branch = Item.conditional();
 		const FString CondId = ToFString(Branch.condition_id());
 
-		metaonnx::Condition* const* CondPtr = Conds.Find(CondId);
+		const metaonnx::Condition* const* CondPtr = Conds.Find(CondId);
 		if (!CondPtr)
 		{
 			LINGO_LOG(EVerbosityLevel::Error, TEXT("Conditional: unknown condition_id %s"), *CondId);
@@ -899,30 +986,176 @@ bool FMetaGraphRunner::ExecuteGraphItem(
 	return true;
 }
 
+static bool GetExpectedTensorDataType(const std::string& DTypeStr, ENNETensorDataType& OutType)
+{
+	if (DTypeStr == "int64")
+	{
+		OutType = ENNETensorDataType::Int64;
+		return true;
+	}
+	if (DTypeStr == "float32")
+	{
+		OutType = ENNETensorDataType::Float;
+		return true;
+	}
+	return false;
+}
+
+// Checks TensorPool against Graph.inputs (the graph's declared external input contract):
+// presence, dtype, and dimensions. Fills in default values for missing optional inputs.
+// Collects every problem found and logs them together, so a caller can fix them all in
+// one pass.
+bool FMetaGraphRunner::ValidateAndFillInputs(const metaonnx::MetaGraph& Graph)
+{
+	TArray<FString> Errors;
+
+	// expression -> (tensor_name, dim_index, size) for every DIM_SYMBOLIC dim seen so
+	// far. Two inputs sharing the same symbolic name (as assigned by the ONNX exporter)
+	// are declaring that those dims must be equal at runtime — this is how that
+	// co-dependency gets enforced.
+	TMap<FString, TTuple<FString, int32, uint32>> SymbolicDims;
+
+	// Pass 1: presence/dtype/shape only. Must fully complete, and fail on any problem,
+	// before filling optional defaults below — a default's dim expression can reference
+	// another declared input, which isn't safe to evaluate until we know that input is
+	// actually present, regardless of where it falls in Graph.inputs()'s order.
+	for (int i = 0; i < Graph.inputs_size(); ++i)
+	{
+		const metaonnx::InputBinding& Gi = Graph.inputs(i);
+		const FString Name = ToFString(Gi.tensor_name());
+
+		const ModelIOData* Tensor = nullptr;
+		if (!TensorPool.TryGetTensor(Name, Tensor) || !Tensor)
+		{
+			if (!Gi.is_optional())
+			{
+				Errors.Add(FString::Printf(TEXT("Missing required input '%s'"), *Name));
+			}
+			continue;
+		}
+
+		ENNETensorDataType ExpectedType;
+		if (!GetExpectedTensorDataType(Gi.dtype(), ExpectedType))
+		{
+			LINGO_LOG(EVerbosityLevel::Error, TEXT("Input '%s' declares unsupported dtype: %s"), *Name, *FString(Gi.dtype().c_str()));
+			return false;
+		}
+		if (Tensor->GetTensorDataType() != ExpectedType)
+		{
+			Errors.Add(FString::Printf(TEXT("Input '%s' has wrong dtype: expected '%s'"), *Name, *FString(Gi.dtype().c_str())));
+		}
+
+		const TConstArrayView<uint32> Shape = Tensor->GetTensorShape().GetData();
+		if (Shape.Num() != Gi.dims_size())
+		{
+			Errors.Add(FString::Printf(TEXT("Input '%s' has wrong number of dimensions: expected %d, got %d"), *Name, Gi.dims_size(), Shape.Num()));
+			continue;
+		}
+
+		for (int j = 0; j < Gi.dims_size(); ++j)
+		{
+			const metaonnx::DimEntry& Dim = Gi.dims(j);
+			if (Dim.type() == metaonnx::DimEntry_DimType_DIM_STATIC)
+			{
+				if (Shape[j] != Dim.size())
+				{
+					Errors.Add(FString::Printf(TEXT("Input '%s' has wrong size at dimension %d: expected %u, got %u"), *Name, j, Dim.size(), Shape[j])
+					);
+				}
+			}
+			else if (Dim.type() == metaonnx::DimEntry_DimType_DIM_SYMBOLIC)
+			{
+				const FString Expression = ToFString(Dim.expression());
+				const uint32 Size = Shape[j];
+				if (const TTuple<FString, int32, uint32>* Prior = SymbolicDims.Find(Expression))
+				{
+					if (Prior->Get<2>() != Size)
+					{
+						Errors.Add(FString::Printf(
+						    TEXT("Input '%s' dimension %d has size %u, but must equal input '%s' dimension %d (size %u) — both share ")
+						        TEXT("symbolic dimension '%s'"),
+						    *Name,
+						    j,
+						    Size,
+						    *Prior->Get<0>(),
+						    Prior->Get<1>(),
+						    Prior->Get<2>(),
+						    *Expression
+						));
+					}
+				}
+				else
+				{
+					SymbolicDims.Add(Expression, MakeTuple(Name, j, Size));
+				}
+			}
+			// DIM_RUNTIME dims are unknowable ahead of time; any size is accepted.
+		}
+	}
+
+	if (Errors.Num() > 0)
+	{
+		for (const FString& Error : Errors)
+		{
+			LINGO_LOG(EVerbosityLevel::Error, TEXT("Invalid inputs: %s"), *Error);
+		}
+		return false;
+	}
+
+	// Pass 2: every declared input is now confirmed present-and-valid or
+	// optional-and-absent, so it's safe to fill missing optional defaults — any tensor
+	// their dim expressions reference is guaranteed resolvable.
+	const FHostMap EmptyHost;
+	for (int i = 0; i < Graph.inputs_size(); ++i)
+	{
+		const metaonnx::InputBinding& Gi = Graph.inputs(i);
+		const FString Name = ToFString(Gi.tensor_name());
+
+		const ModelIOData* Existing = nullptr;
+		if (!TensorPool.TryGetTensor(Name, Existing) && Gi.is_optional() && Gi.has_default_value())
+		{
+			TUniquePtr<ModelIOData> Default = BuildTensorCreateArray(Gi.default_value(), EmptyHost);
+			if (!Default)
+			{
+				LINGO_LOG(EVerbosityLevel::Error, TEXT("Input '%s': failed to build default value"), *Name);
+				return false;
+			}
+			TensorPool.SetTensor(Name, MoveTemp(Default));
+		}
+	}
+
+	return true;
+}
+
 // Main entry point: builds lookup maps for nodes/loops/conditions, then executes the graph items in order.
 // Each graph item can be a model node, a host action, a loop, or a conditional branch.
-bool FMetaGraphRunner::Run(const metaonnx::MetaGraph& Graph, TArray<float>& OutSamples)
+bool FMetaGraphRunner::Run(const metaonnx::MetaGraph& Graph)
 {
+	if (!ValidateAndFillInputs(Graph))
+	{
+		LINGO_LOG(EVerbosityLevel::Error, TEXT("MetaGraphRunner: input validation failed, aborting"));
+		return false;
+	}
 
 	FHostMap Host;
 
-	TMap<FString, metaonnx::Node*> Nodes;
-	TMap<FString, metaonnx::Loop*> Loops;
-	TMap<FString, metaonnx::Condition*> Conds;
+	TMap<FString, const metaonnx::Node*> Nodes;
+	TMap<FString, const metaonnx::Loop*> Loops;
+	TMap<FString, const metaonnx::Condition*> Conds;
 
 	for (int i = 0; i < Graph.nodes_size(); ++i)
 	{
-		metaonnx::Node* N = const_cast<metaonnx::Node*>(&Graph.nodes(i));
+		const metaonnx::Node* N = &Graph.nodes(i);
 		Nodes.Add(ToFString(N->id()), N);
 	}
 	for (int i = 0; i < Graph.loops_size(); ++i)
 	{
-		metaonnx::Loop* L = const_cast<metaonnx::Loop*>(&Graph.loops(i));
+		const metaonnx::Loop* L = &Graph.loops(i);
 		Loops.Add(ToFString(L->id()), L);
 	}
 	for (int i = 0; i < Graph.conditions_size(); ++i)
 	{
-		metaonnx::Condition* C = const_cast<metaonnx::Condition*>(&Graph.conditions(i));
+		const metaonnx::Condition* C = &Graph.conditions(i);
 		Conds.Add(ToFString(C->id()), C);
 	}
 
@@ -933,10 +1166,6 @@ bool FMetaGraphRunner::Run(const metaonnx::MetaGraph& Graph, TArray<float>& OutS
 			return false;
 		}
 	}
-
-	// TODO: Remove when callback types are implemented
-	// TArray<float> Dummy;
-	// Callback(Dummy, true);
 
 	return true;
 }

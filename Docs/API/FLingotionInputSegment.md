@@ -16,10 +16,24 @@ FString Text;
 ```
 
 ### `Emotion`
-The emotion to apply to this segment. None uses the default emotion from the parent FLingotionModelInput.
+Legacy single emotion used by the current inference path. The Advanced GUI edits StartEmotion and EndEmotion instead.
 
 ```cpp
-EEmotion Emotion;
+EEmotion Emotion = EEmotion::None;
+```
+
+### `StartEmotion`
+The emotion to apply to the start of this segment. TMap keys are emotions, values are their intensities (Sums to 1)
+
+```cpp
+TMap<EEmotion, float> StartEmotion;
+```
+
+### `EndEmotion`
+The emotion to apply to the end of this segment. TMap keys are emotions, values are their intensities (Sums to 1)
+
+```cpp
+TMap<EEmotion, float> EndEmotion;
 ```
 
 ### `Language`
@@ -34,4 +48,24 @@ When true, the Text is treated as a custom phonetic pronunciation (IPA) rather t
 
 ```cpp
 bool bIsCustomPronounced = false;
+```
+
+### `StartSpeed`
+```cpp
+float StartSpeed = 1.0f;
+```
+
+### `EndSpeed`
+```cpp
+float EndSpeed = 1.0f;
+```
+
+### `StartLoudness`
+```cpp
+float StartLoudness = 1.0f;
+```
+
+### `EndLoudness`
+```cpp
+float EndLoudness = 1.0f;
 ```

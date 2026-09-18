@@ -10,6 +10,10 @@
 #include "Serialization/JsonWriter.h"
 #include "Core/ManifestHandler.h"
 #include "Misc/ConfigCacheIni.h"
+#include "EditorDataCache.h"
+#include "Interfaces/IPluginManager.h"
+
+bool FEditorLicenseKeyValidator::bVerifyInFlight = false;
 
 void FEditorLicenseKeyValidator::ValidateLicenseAsync(FOnLicenseValidationResult ResultCallback)
 {
@@ -21,8 +25,28 @@ void FEditorLicenseKeyValidator::ValidateLicenseAsync(FOnLicenseValidationResult
 		return;
 	}
 
+	// Single-in-flight guard
+	if (bVerifyInFlight)
+	{
+		LINGO_LOG(EVerbosityLevel::Debug, TEXT("License verification already in flight; skipping."));
+		ResultCallback.ExecuteIfBound(Settings->ValidationState == ELicenseValidationState::Valid);
+		return;
+	}
+	bVerifyInFlight = true;
+
+	// Snapshot the data cache now; the same snapshot is embedded in the payload and subtracted
+	// back out on HTTP 200, so synths landing during the round-trip are preserved.
+	FEditorDataCache::FSynthData DataSnapshot = FEditorDataCache::Snapshot();
+
 	FString JsonPayload;
-	BuildJsonPayload(LicenseKey, JsonPayload);
+	BuildJsonPayload(LicenseKey, DataSnapshot, JsonPayload);
+	if (JsonPayload.IsEmpty())
+	{
+		bVerifyInFlight = false;
+		LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to build JSON payload for license verification."));
+		ResultCallback.ExecuteIfBound(false);
+		return;
+	}
 
 	TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Request = FHttpModule::Get().CreateRequest();
 	Request->SetURL(TEXT("https://portal.lingotion.com/v1/licenses/verify"));
@@ -31,23 +55,30 @@ void FEditorLicenseKeyValidator::ValidateLicenseAsync(FOnLicenseValidationResult
 	Request->SetContentAsString(JsonPayload);
 
 	Request->OnProcessRequestComplete().BindLambda(
-	    [ResultCallback](FHttpRequestPtr Req, FHttpResponsePtr Resp, bool bSuccess)
+	    [ResultCallback, DataSnapshot = MoveTemp(DataSnapshot)](FHttpRequestPtr Req, FHttpResponsePtr Resp, bool bSuccess)
 	    {
+		    bVerifyInFlight = false;
 		    bool bIsValid = false;
 
 		    if (bSuccess && Resp.IsValid() && Resp->GetResponseCode() == 200)
 		    {
 			    bIsValid = true;
+			    FEditorDataCache::SubtractAndPersist(DataSnapshot);
 		    }
 
 		    ResultCallback.ExecuteIfBound(bIsValid);
 	    }
 	);
 
-	Request->ProcessRequest();
+	if (!Request->ProcessRequest())
+	{
+		bVerifyInFlight = false;
+		LINGO_LOG(EVerbosityLevel::Warning, TEXT("Failed to dispatch license verification request."));
+		ResultCallback.ExecuteIfBound(false);
+	}
 }
 
-void FEditorLicenseKeyValidator::BuildJsonPayload(const FString& LicenseKey, FString& OutJson)
+void FEditorLicenseKeyValidator::BuildJsonPayload(const FString& LicenseKey, const FEditorDataCache::FSynthData& DataSnapshot, FString& OutJson)
 {
 
 	// Get project GUID from DefaultGame.ini
@@ -92,6 +123,16 @@ void FEditorLicenseKeyValidator::BuildJsonPayload(const FString& LicenseKey, FSt
 	}
 
 	DataObject->SetArrayField(TEXT("Modules"), ModulesArray);
+
+	DataObject->SetObjectField(TEXT("cacheData"), FEditorDataCache::ToJsonObject(DataSnapshot));
+
+	FString PackageVersion;
+	if (const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("LingotionThespeon")))
+	{
+		PackageVersion = Plugin->GetDescriptor().VersionName;
+	}
+	DataObject->SetStringField(TEXT("packageVersion"), PackageVersion);
+
 	PayloadObject->SetObjectField(TEXT("data"), DataObject);
 
 	// Convert to string

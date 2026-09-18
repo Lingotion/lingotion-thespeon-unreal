@@ -42,9 +42,18 @@ class UInferenceWorkloadManager : public UGameInstanceSubsystem
 	 * @param Module - The module indicating models to load
 	 * @param BackendType - The backend type to load workload on
 	 */
+	/**
+	 * @param Priority Forwarded to FStreamableManager::RequestAsyncLoad via Module::LoadModels.
+	 *                 Use 100 (FStreamableManager::AsyncLoadHighPriority) for synth-triggered loads
+	 *                 so they jump ahead of background preloads in the streamable manager queue.
+	 * @param bForceRequestedBackend When true, ignores any preferred_device declared by the module's
+	 *                 metagraph nodes and builds every model on BackendType.
+	 */
 	bool RegisterModuleWorkload(
 	    Thespeon::Core::Module* Module,
-	    EBackendType BackendType
+	    EBackendType BackendType,
+	    int32 Priority = 0,
+	    bool bForceRequestedBackend = false
 	); // loads each onnx in module and from its ModelData creates an InferenceWorkload.
 	bool TryDeregisterModuleWorkloads(
 	    Thespeon::Core::Module* Module,

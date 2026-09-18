@@ -177,9 +177,10 @@ class LINGOTIONTHESPEON_API UThespeonComponent : public UActorComponent
 		FString CharacterName;
 		EThespeonModuleType ModuleType;
 		EBackendType BackendType;
+		bool bForceRequestedBackend = false;
 		FString PreloadGroupId;
 
-		// PreloadGroupId intentionally excluded — dedup is by character/module/backend only.
+		// PreloadGroupId and bForceRequestedBackend intentionally excluded — dedup is by character/module/backend only.
 		bool operator==(const PreloadRequest& Other) const
 		{
 			return CharacterName == Other.CharacterName && ModuleType == Other.ModuleType && BackendType == Other.BackendType;
@@ -195,6 +196,8 @@ class LINGOTIONTHESPEON_API UThespeonComponent : public UActorComponent
 
 	void PruneFinishedPreloadThreads();
 	void ProcessPendingRequests();
+	/** Returns true if a currently active preload is loading the model the next queued synth needs. */
+	bool IsActivePreloadBlockingNextSynth() const;
 	void RunSynthesisRequest(SynthRequest Request);
 	void RunPreloadRequest(PreloadRequest Request);
 	void ResetState();

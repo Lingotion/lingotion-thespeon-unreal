@@ -3,9 +3,9 @@
 using UnrealBuildTool;
 using System.IO;
 
-public class Protobuf : ModuleRules
+public class LingotionProtobuf : ModuleRules
 {
-    public Protobuf(ReadOnlyTargetRules Target) : base(Target)
+    public LingotionProtobuf(ReadOnlyTargetRules Target) : base(Target)
     {
         Type = ModuleType.External;
 

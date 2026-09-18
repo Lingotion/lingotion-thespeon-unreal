@@ -1,6 +1,7 @@
 // Copyright 2025 - 2026 Lingotion AB All Rights Reserved
 
 #include "Core/ModelInput.h"
+#include "Core/KeypointUtils.h"
 #include "Core/LingotionLogger.h"
 #include "Core/ManifestHandler.h"
 #include "Inference/ModuleManager.h"
@@ -118,7 +119,24 @@ bool FLingotionModelInput::ValidateAndPopulate(
 		// Split segment by numbers - this converts numbers to phonemes in separate CustomPronounced segments
 		// This prevents double-phonemization of already converted numbers
 		TArray<FLingotionInputSegment> SplitSegments = FTextPreprocessor::SplitSegmentByNumbers(Segment);
+		if (SplitSegments.IsEmpty())
+		{
+			LINGO_LOG(EVerbosityLevel::Error, TEXT("Segment preprocessing unexpectedly produced no segments."));
+			return false;
+		}
 		ProcessedSegments.Append(SplitSegments);
+	}
+	if (!Thespeon::Core::PopulateEmotionKeypoints(ProcessedSegments, this->DefaultEmotion))
+	{
+		return false;
+	}
+	if (!Thespeon::Core::PopulateSpeedKeypoints(ProcessedSegments))
+	{
+		return false;
+	}
+	if (!Thespeon::Core::PopulateLoudnessKeypoints(ProcessedSegments))
+	{
+		return false;
 	}
 
 	// Replace original segments with processed (potentially expanded) segments
@@ -273,6 +291,13 @@ TArray<FLingotionLanguage> FLingotionModelInput::GetCandidateLanguages(UManifest
 	// TSharedPtr keeps module alive for this scope; raw pointer used for downstream API compatibility
 	TSharedPtr<Thespeon::Character::CharacterModule, ESPMode::ThreadSafe> CharacterModulePtr =
 	    ModuleManager->GetModule<Thespeon::Character::CharacterModule>(Entry, false);
+	if (!CharacterModulePtr)
+	{
+		LINGO_LOG(
+		    EVerbosityLevel::Error, TEXT("Character module '%s' is not loaded, cannot determine its supported languages."), *this->CharacterName
+		);
+		return TArray<FLingotionLanguage>();
+	}
 	Thespeon::Character::CharacterModule* CharacterModule = CharacterModulePtr.Get();
 
 	TArray<FLingotionLanguage> CandidateLanguages = CharacterModule->GetSupportedLanguages();

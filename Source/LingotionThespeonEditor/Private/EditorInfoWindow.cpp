@@ -134,8 +134,7 @@ void FEditorInfoWindow::RebuildTabContent()
 				FString Name = ModuleInfo.Name;
 				FString JsonPath = ModuleInfo.JsonPath;
 				FString CharacterName = ModuleInfo.CharacterName.IsEmpty() ? TEXT("Unknown") : ModuleInfo.CharacterName;
-				FString Quality = ModuleInfo.Quality.IsEmpty() ? TEXT("Unknown") : ModuleInfo.Quality;
-
+				FString Size = ModuleInfo.Size.IsEmpty() ? TEXT("Unknown") : ModuleInfo.Size;
 				// Create a selectable horizontal box for this character module with context menu
 				ContentBox->AddSlot().AutoHeight().Padding(
 				    15.0f, 2.0f, 5.0f, 2.0f
@@ -144,14 +143,20 @@ void FEditorInfoWindow::RebuildTabContent()
 				      .BorderBackgroundColor(this, &FEditorInfoWindow::GetModuleBackgroundColor, ModuleID)
 				      .Padding(5.0f)
 				      .OnMouseButtonUp(
-				          this, &FEditorInfoWindow::OnModuleMouseButtonUp, ModuleID, Name, JsonPath, CharacterName, Quality, true
+				          this, &FEditorInfoWindow::OnModuleMouseButtonUp, ModuleID, Name, JsonPath, CharacterName, Size, ModuleInfo.Version, true
 				      )[SNew(SHorizontalBox) +
 				        SHorizontalBox::Slot().AutoWidth().Padding(
 				            0.0f, 0.0f, 10.0f, 0.0f
 				        )[SNew(STextBlock).Text(FText::FromString(FString::Printf(TEXT("• Character: %s"), *CharacterName)))] +
 				        SHorizontalBox::Slot().AutoWidth()[SNew(STextBlock)
-				                                               .Text(FText::FromString(FString::Printf(TEXT("Module Type: %s"), *Quality)))
-				                                               .ColorAndOpacity(FSlateColor(FLinearColor(0.7f, 0.7f, 0.7f)))]]];
+				                                               .Text(FText::FromString(FString::Printf(TEXT("Module Type: %s"), *Size)))
+				                                               .ColorAndOpacity(FSlateColor(FLinearColor(0.7f, 0.7f, 0.7f)))] +
+				        SHorizontalBox::Slot().AutoWidth().Padding(
+				            10.0f, 0.0f, 0.0f, 0.0f
+				        )[SNew(STextBlock)
+				              .Text(FText::FromString(FString::Printf(TEXT("Version: %s"), *ModuleInfo.Version.ToString(false))))
+				              .Font(FCoreStyle::GetDefaultFontStyle("Italic", 10))
+				              .ColorAndOpacity(FSlateColor(FLinearColor(0.63f, 0.63f, 0.63f)))]]];
 			}
 		}
 		else
@@ -182,7 +187,6 @@ void FEditorInfoWindow::RebuildTabContent()
 				FString Name = ModuleInfo.Name;
 				FString JsonPath = ModuleInfo.JsonPath;
 				FString LanguageName = ModuleInfo.LanguageName.IsEmpty() ? TEXT("Unknown") : ModuleInfo.LanguageName;
-
 				// Create selectable entry for this language module with context menu
 				ContentBox->AddSlot().AutoHeight().Padding(
 				    15.0f, 2.0f, 5.0f, 2.0f
@@ -191,8 +195,24 @@ void FEditorInfoWindow::RebuildTabContent()
 				      .BorderBackgroundColor(this, &FEditorInfoWindow::GetModuleBackgroundColor, ModuleID)
 				      .Padding(5.0f)
 				      .OnMouseButtonUp(
-				          this, &FEditorInfoWindow::OnModuleMouseButtonUp, ModuleID, Name, JsonPath, LanguageName, FString(), false
-				      )[SNew(STextBlock).Text(FText::FromString(FString::Printf(TEXT("• Language: %s"), *LanguageName)))]];
+				          this,
+				          &FEditorInfoWindow::OnModuleMouseButtonUp,
+				          ModuleID,
+				          Name,
+				          JsonPath,
+				          LanguageName,
+				          FString(),
+				          ModuleInfo.Version,
+				          false
+				      )[SNew(SHorizontalBox) +
+				        SHorizontalBox::Slot().AutoWidth(
+				        )[SNew(STextBlock).Text(FText::FromString(FString::Printf(TEXT("• Language: %s"), *LanguageName)))] +
+				        SHorizontalBox::Slot().AutoWidth().Padding(
+				            10.0f, 0.0f, 0.0f, 0.0f
+				        )[SNew(STextBlock)
+				              .Text(FText::FromString(FString::Printf(TEXT("Version: %s"), *ModuleInfo.Version.ToString(false))))
+				              .Font(FCoreStyle::GetDefaultFontStyle("Italic", 10))
+				              .ColorAndOpacity(FSlateColor(FLinearColor(0.63f, 0.63f, 0.63f)))]]];
 			}
 		}
 		else
@@ -302,6 +322,7 @@ FReply FEditorInfoWindow::OnModuleMouseButtonUp(
     FString JsonPath,
     FString InfoText,
     FString InfoText2,
+    Thespeon::Core::FVersion Version,
     bool bIsCharacterModule
 )
 {
@@ -315,16 +336,17 @@ FReply FEditorInfoWindow::OnModuleMouseButtonUp(
 		    LOCTEXT("CopyModuleInfoTooltip", "Copy module information to clipboard"),
 		    FSlateIcon(),
 		    FUIAction(FExecuteAction::CreateLambda(
-		        [InfoText, InfoText2, bIsCharacterModule]()
+		        [InfoText, InfoText2, Version, bIsCharacterModule]()
 		        {
 			        FString ClipboardText;
 			        if (bIsCharacterModule && !InfoText2.IsEmpty())
 			        {
-				        ClipboardText = FString::Printf(TEXT("Character: %s, Module Type: %s"), *InfoText, *InfoText2);
+				        ClipboardText =
+				            FString::Printf(TEXT("Character: %s, Module Type: %s, Version: %s"), *InfoText, *InfoText2, *Version.ToString(false));
 			        }
 			        else
 			        {
-				        ClipboardText = FString::Printf(TEXT("Language: %s"), *InfoText);
+				        ClipboardText = FString::Printf(TEXT("Language: %s, Version: %s"), *InfoText, *Version.ToString(false));
 			        }
 			        FPlatformApplicationMisc::ClipboardCopy(*ClipboardText);
 		        }

@@ -37,7 +37,7 @@ bool UModuleManager::TryDeregisterModule(FString ModuleID)
 	{
 		return true; // not registered anyway
 	}
-	if (!ModulePtr->Get()->LoadedBackends.IsEmpty())
+	if (!ModulePtr->Get()->RegisteredWorkloads.IsEmpty())
 	{
 		return false; // workloads still loaded, cannot deregister
 	}
@@ -52,12 +52,34 @@ bool UModuleManager::IsRegistered(FString ModuleID)
 	return Modules.Contains(ModuleID);
 }
 
+// Collects the workload IDs a module recorded for the given requested backend, or across every
+// backend it is registered on when BackendType is None.
+static TSet<FString> GatherRecordedWorkloadIDs(const Thespeon::Core::Module& Module, EBackendType BackendType)
+{
+	if (BackendType != EBackendType::None)
+	{
+		const TSet<FString>* Recorded = Module.RegisteredWorkloads.Find(BackendType);
+		return Recorded ? *Recorded : TSet<FString>();
+	}
+
+	TSet<FString> All;
+	for (const auto& Pair : Module.RegisteredWorkloads)
+	{
+		All.Append(Pair.Value);
+	}
+	return All;
+}
+
 // Determines which workload IDs can be safely removed when unloading a module.
-// Computes the set difference between this module's workload IDs and the IDs used by all
+// Computes the set difference between this module's recorded workload IDs and those recorded by all
 // other loaded modules of the same type, ensuring shared models are not prematurely removed.
+//
+// Both sides read what registration recorded rather than re-deriving IDs from the backend: a
+// metagraph device pin can make a workload ID name a backend other than the requested one, so a
+// re-derivation could not reproduce what was actually created.
 TSet<FString> UModuleManager::GetWorkloadIDsToRemove(Thespeon::Core::Module* Module, EBackendType BackendType)
 {
-	if (BackendType != EBackendType::None && !Module->LoadedBackends.Contains(BackendType))
+	if (BackendType != EBackendType::None && !Module->RegisteredWorkloads.Contains(BackendType))
 	{
 		LINGO_LOG_FUNC(
 		    EVerbosityLevel::Debug,
@@ -67,28 +89,36 @@ TSet<FString> UModuleManager::GetWorkloadIDsToRemove(Thespeon::Core::Module* Mod
 		);
 		return TSet<FString>();
 	}
-	TSet<FString> WorkloadIDs;
-	if (!Module->AddLoadedWorkloadIDs(BackendType, WorkloadIDs))
-	{
-		LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to get loaded workload IDs for module '%s'."), *Module->ModuleID);
-		return TSet<FString>();
-	}
+	const TSet<FString> WorkloadIDs = GatherRecordedWorkloadIDs(*Module, BackendType);
 	TSet<FString> OtherWorkloadIDs;
+
+	// This module's own other registrations come first. A declared device makes a workload ID
+	// identical no matter which backend was requested — the phonemizer is "CPU_<md5>" whether it was
+	// preloaded for CPU or GPU — so unloading one backend must not remove a pool the module's other
+	// registered backends are still using.
+	if (BackendType != EBackendType::None)
+	{
+		for (const auto& Registration : Module->RegisteredWorkloads)
+		{
+			if (Registration.Key != BackendType)
+			{
+				OtherWorkloadIDs.Append(Registration.Value);
+			}
+		}
+	}
 
 	FReadScopeLock ReadLock(ModulesLock);
 	for (const auto& LoadedModule : Modules)
 	{
-		// skip modules that are the same, of different type, or not loaded on the backend in question
-		if (LoadedModule.Value->ModuleID == Module->ModuleID || LoadedModule.Value->GetModuleType() != Module->GetModuleType() ||
-		    (BackendType != EBackendType::None && !LoadedModule.Value->LoadedBackends.Contains(BackendType)))
+		// skip modules that are the same or of a different type. Other modules are compared across
+		// every backend they are registered on, not just the one being unloaded: because a pinned
+		// workload ID does not name the requested backend, a module loaded on CPU can legitimately
+		// own an ID that a GPU unload would otherwise remove from under it.
+		if (LoadedModule.Value->ModuleID == Module->ModuleID || LoadedModule.Value->GetModuleType() != Module->GetModuleType())
 		{
 			continue;
 		}
-		if (!LoadedModule.Value->AddLoadedWorkloadIDs(BackendType, OtherWorkloadIDs))
-		{
-			LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to get loaded workload IDs for module '%s'."), *LoadedModule.Value->ModuleID);
-			return TSet<FString>();
-		}
+		OtherWorkloadIDs.Append(GatherRecordedWorkloadIDs(*LoadedModule.Value, EBackendType::None));
 	}
 
 	return WorkloadIDs.Difference(OtherWorkloadIDs);

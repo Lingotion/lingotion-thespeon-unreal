@@ -19,20 +19,24 @@ FPreloadSession::FPreloadSession(
     FString InCharacterName,
     EThespeonModuleType InModuleType,
     EBackendType InBackendType,
+    bool InForceRequestedBackend,
     UInferenceWorkloadManager* InWorkloadMgr,
     UModuleManager* InModuleMgr,
     ULookupTableManager* InLookupMgr,
     UManifestHandler* InManifest,
-    FOnComplete InOnComplete
+    FOnComplete InOnComplete,
+    int32 InLoadPriority
 )
     : CharacterName(MoveTemp(InCharacterName))
     , ModuleType(InModuleType)
     , BackendType(InBackendType)
+    , bForceRequestedBackend(InForceRequestedBackend)
     , WorkloadMgr(InWorkloadMgr)
     , ModuleMgr(InModuleMgr)
     , LookupMgr(InLookupMgr)
     , ManifestHandler(InManifest)
     , OnComplete(MoveTemp(InOnComplete))
+    , LoadPriority(InLoadPriority)
 {
 }
 
@@ -141,6 +145,8 @@ uint32 FPreloadSession::Run()
 		     WorkloadMgr = this->WorkloadMgr,
 		     LookupMgr = this->LookupMgr,
 		     LangBackendType = this->BackendType,
+		     LangForceBackend = this->bForceRequestedBackend,
+		     LangPriority = this->LoadPriority,
 		     LangEntry]() -> bool
 		    {
 			    if (StopFlag->load())
@@ -163,7 +169,7 @@ uint32 FPreloadSession::Run()
 			    }
 
 			    LINGO_LOG_FUNC(EVerbosityLevel::Info, TEXT("Registering workload for Language Module: %s"), *(LangModule->ModuleID));
-			    if (!WorkloadMgr->RegisterModuleWorkload(LangModule, LangBackendType))
+			    if (!WorkloadMgr->RegisterModuleWorkload(LangModule, LangBackendType, LangPriority, LangForceBackend))
 			    {
 				    LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to register LanguageModule workload: %s"), *(LangModule->ModuleID));
 				    return false;
@@ -185,14 +191,19 @@ uint32 FPreloadSession::Run()
 	// Both register workloads via the thread-safe InferenceWorkloadManager.
 	Futures.Add(Async(
 	    EAsyncExecution::TaskGraph,
-	    [StopFlag, WorkloadMgr = this->WorkloadMgr, CharBackendType = this->BackendType, CharacterModule]() -> bool
+	    [StopFlag,
+	     WorkloadMgr = this->WorkloadMgr,
+	     CharBackendType = this->BackendType,
+	     CharForceBackend = this->bForceRequestedBackend,
+	     CharPriority = this->LoadPriority,
+	     CharacterModule]() -> bool
 	    {
 		    if (StopFlag->load())
 		    {
 			    return false;
 		    }
 
-		    if (!WorkloadMgr->RegisterModuleWorkload(CharacterModule, CharBackendType))
+		    if (!WorkloadMgr->RegisterModuleWorkload(CharacterModule, CharBackendType, CharPriority, CharForceBackend))
 		    {
 			    LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to register CharacterModule workload: %s"), *(CharacterModule->ModuleID));
 			    return false;

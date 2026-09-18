@@ -189,6 +189,12 @@ const FRegexPattern& FTextPreprocessor::GetNumberPattern(const FString& Iso639_2
 TArray<FLingotionInputSegment> FTextPreprocessor::SplitSegmentByNumbers(const FLingotionInputSegment& Segment)
 {
 	TArray<FLingotionInputSegment> ResultSegments;
+	auto MakeSplitSegment = [&Segment](const FString& Text, const bool bIsCustomPronounced)
+	{
+		TMap<EEmotion, float> EmptyStartEmotion;
+		TMap<EEmotion, float> EmptyEndEmotion;
+		return FLingotionInputSegment(Text, MoveTemp(EmptyStartEmotion), MoveTemp(EmptyEndEmotion), Segment.Language, bIsCustomPronounced);
+	};
 
 	// If segment is already custom pronounced, don't process it
 	if (Segment.bIsCustomPronounced)
@@ -267,7 +273,7 @@ TArray<FLingotionInputSegment> FTextPreprocessor::SplitSegmentByNumbers(const FL
 		// Add text segment before the number (if any)
 		if (MatchBegin > LastEnd)
 		{
-			ResultSegments.Add(FLingotionInputSegment(Segment.Text.Mid(LastEnd, MatchBegin - LastEnd), Segment.Emotion, Segment.Language, false));
+			ResultSegments.Add(MakeSplitSegment(Segment.Text.Mid(LastEnd, MatchBegin - LastEnd), false));
 
 			LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Added text segment: '%s'"), *ResultSegments.Last().Text);
 		}
@@ -277,12 +283,7 @@ TArray<FLingotionInputSegment> FTextPreprocessor::SplitSegmentByNumbers(const FL
 		const FString ConvertedNumber = Converter->ConvertNumber(NumberStr);
 
 		// Add the converted number as a custom pronounced segment
-		ResultSegments.Add(FLingotionInputSegment(
-		    ConvertedNumber,
-		    Segment.Emotion,
-		    Segment.Language,
-		    true // Mark as custom pronounced to skip phonemizer
-		));
+		ResultSegments.Add(MakeSplitSegment(ConvertedNumber, true));
 
 		LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Converted number '%s' -> '%s' (CustomPronounced)"), *NumberStr, *ConvertedNumber);
 
@@ -292,7 +293,7 @@ TArray<FLingotionInputSegment> FTextPreprocessor::SplitSegmentByNumbers(const FL
 	// Add any remaining text after the last number
 	if (bFoundNumbers && LastEnd < Segment.Text.Len())
 	{
-		ResultSegments.Add(FLingotionInputSegment(Segment.Text.Mid(LastEnd), Segment.Emotion, Segment.Language, false));
+		ResultSegments.Add(MakeSplitSegment(Segment.Text.Mid(LastEnd), false));
 
 		LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Added trailing text segment: '%s'"), *ResultSegments.Last().Text);
 	}
@@ -301,6 +302,45 @@ TArray<FLingotionInputSegment> FTextPreprocessor::SplitSegmentByNumbers(const FL
 	if (!bFoundNumbers)
 	{
 		ResultSegments.Add(Segment);
+	}
+	else
+	{
+		// Splitting must not introduce emotion keypoints. Preserve only the
+		// original segment's outer endpoints on the resulting global span.
+		ResultSegments[0].StartEmotion = Segment.StartEmotion;
+		ResultSegments.Last().EndEmotion = Segment.EndEmotion;
+
+		// Speed and loudness have no unset representation. Sample the original
+		// linear ramps at each new boundary so splitting does not restart or bend
+		// either curve.
+		int32 TotalLength = 0;
+		for (const FLingotionInputSegment& ResultSegment : ResultSegments)
+		{
+			TotalLength += ResultSegment.Text.Len();
+		}
+
+		if (ResultSegments.Num() == 1 || TotalLength <= 1)
+		{
+			ResultSegments[0].StartSpeed = Segment.StartSpeed;
+			ResultSegments[0].EndSpeed = Segment.EndSpeed;
+			ResultSegments[0].StartLoudness = Segment.StartLoudness;
+			ResultSegments[0].EndLoudness = Segment.EndLoudness;
+		}
+		else
+		{
+			int32 Cursor = 0;
+			for (FLingotionInputSegment& ResultSegment : ResultSegments)
+			{
+				const int32 EndPosition = Cursor + ResultSegment.Text.Len() - 1;
+				const float StartAlpha = static_cast<float>(Cursor) / static_cast<float>(TotalLength - 1);
+				const float EndAlpha = static_cast<float>(EndPosition) / static_cast<float>(TotalLength - 1);
+				ResultSegment.StartSpeed = FMath::Lerp(Segment.StartSpeed, Segment.EndSpeed, StartAlpha);
+				ResultSegment.EndSpeed = FMath::Lerp(Segment.StartSpeed, Segment.EndSpeed, EndAlpha);
+				ResultSegment.StartLoudness = FMath::Lerp(Segment.StartLoudness, Segment.EndLoudness, StartAlpha);
+				ResultSegment.EndLoudness = FMath::Lerp(Segment.StartLoudness, Segment.EndLoudness, EndAlpha);
+				Cursor = EndPosition + 1;
+			}
+		}
 	}
 
 	LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Split into %d segments"), ResultSegments.Num());

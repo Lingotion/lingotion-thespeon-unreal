@@ -204,6 +204,29 @@ void UThespeonComponent::PruneFinishedPreloadThreads()
 	}
 }
 
+bool UThespeonComponent::IsActivePreloadBlockingNextSynth() const
+{
+	SynthRequest Next;
+	if (!SynthRequestQueue.Peek(Next))
+	{
+		return false;
+	}
+	const EBackendType WantBackend = ResolveBackend(GetDefaultBackendType(Next.InferenceConfig.BackendType));
+	for (const auto& Sess : ActivePreloadSessions)
+	{
+		if (!Sess || Sess->IsFinished())
+		{
+			continue;
+		}
+		if (Sess->GetCharacterName() == Next.Input.CharacterName && Sess->GetModuleType() == Next.Input.ModuleType &&
+		    Sess->GetBackendType() == WantBackend)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 void UThespeonComponent::ProcessPendingRequests()
 {
 	PruneFinishedPreloadThreads();
@@ -215,12 +238,13 @@ void UThespeonComponent::ProcessPendingRequests()
 		);
 		return;
 	}
-	// Synthesis must wait for all active preloads to finish before starting,
-	// since a preload may be loading the character needed for the next synth.
-	if (!SynthRequestQueue.IsEmpty() && ActivePreloadCount.load() > 0)
+	// Synthesis only waits for active preloads that are loading the *same* model it needs —
+	// unrelated preloads can keep running in parallel with synthesis.
+	if (!SynthRequestQueue.IsEmpty() && IsActivePreloadBlockingNextSynth())
 	{
 		LINGO_LOG_FUNC(
-		    EVerbosityLevel::Debug, TEXT("ProcessPendingRequests: synthesis request pending but preloads are still in progress. Waiting.")
+		    EVerbosityLevel::Debug,
+		    TEXT("ProcessPendingRequests: synthesis request pending and its target model is being preloaded. Waiting for that preload.")
 		);
 		return;
 	}
@@ -228,7 +252,10 @@ void UThespeonComponent::ProcessPendingRequests()
 	if (SynthRequestQueue.Dequeue(PoppedRequest))
 	{
 		PreloadRequest CorrespondingPreload{
-		    PoppedRequest.Input.CharacterName, PoppedRequest.Input.ModuleType, PoppedRequest.InferenceConfig.BackendType
+		    PoppedRequest.Input.CharacterName,
+		    PoppedRequest.Input.ModuleType,
+		    PoppedRequest.InferenceConfig.BackendType,
+		    PoppedRequest.InferenceConfig.bForceRequestedBackend
 		};
 		if (PreloadRequests.Contains(CorrespondingPreload))
 		{
@@ -265,6 +292,28 @@ void UThespeonComponent::Synthesize(FLingotionModelInput Input, FString SessionI
 {
 	SynthRequestQueue.Enqueue({Input, SessionId, InferenceConfig});
 	LINGO_LOG_FUNC(EVerbosityLevel::Info, TEXT("Enqueued synthesis request for session '%s'."), *SessionId);
+
+	// Fast-track: if the model needed by this synth is queued for preload, bump it to the
+	// front so the next free preload slot loads it. The synth then either folds it inline
+	// (ProcessPendingRequests below) or, if it has already become active, waits only for
+	// that specific preload via IsActivePreloadBlockingNextSynth.
+	PreloadRequest Needed{
+	    Input.CharacterName,
+	    Input.ModuleType,
+	    ResolveBackend(GetDefaultBackendType(InferenceConfig.BackendType)),
+	    InferenceConfig.bForceRequestedBackend
+	};
+	const int32 Idx = PreloadRequests.IndexOfByKey(Needed);
+	if (Idx > 0)
+	{
+		PreloadRequest Bumped = MoveTemp(PreloadRequests[Idx]);
+		PreloadRequests.RemoveAt(Idx);
+		PreloadRequests.Insert(MoveTemp(Bumped), 0);
+		LINGO_LOG_FUNC(
+		    EVerbosityLevel::Info, TEXT("Fast-tracked preload for '%s' to the front of the queue for pending synth."), *Input.CharacterName
+		);
+	}
+
 	ProcessPendingRequests();
 }
 
@@ -341,7 +390,7 @@ void UThespeonComponent::RunSynthesisRequest(SynthRequest Request)
 // Launches preloading on a background thread and broadcasts OnPreloadComplete on the game thread when done.
 void UThespeonComponent::PreloadCharacter(FString CharacterName, EThespeonModuleType ModuleType, FInferenceConfig InferenceConfig)
 {
-	PreloadRequest NewRequest{CharacterName, ModuleType, InferenceConfig.BackendType};
+	PreloadRequest NewRequest{CharacterName, ModuleType, InferenceConfig.BackendType, InferenceConfig.bForceRequestedBackend};
 	if (PreloadRequests.Contains(NewRequest))
 	{
 		LINGO_LOG_FUNC(
@@ -368,7 +417,9 @@ void UThespeonComponent::PreloadCharacterGroup(TArray<FPreloadEntry> Characters,
 	TArray<PreloadRequest> NewRequests;
 	for (const FPreloadEntry& Entry : Characters)
 	{
-		PreloadRequest Req{Entry.CharacterName, Entry.ModuleType, Entry.InferenceConfig.BackendType, PreloadGroupId};
+		PreloadRequest Req{
+		    Entry.CharacterName, Entry.ModuleType, Entry.InferenceConfig.BackendType, Entry.InferenceConfig.bForceRequestedBackend, PreloadGroupId
+		};
 		if (PreloadRequests.Contains(Req) || NewRequests.Contains(Req))
 		{
 			LINGO_LOG_FUNC(
@@ -414,10 +465,11 @@ void UThespeonComponent::RunPreloadRequest(PreloadRequest Request)
 	EBackendType BackendType = ResolveBackend(GetDefaultBackendType(Request.BackendType));
 	LINGO_LOG_FUNC(
 	    EVerbosityLevel::Debug,
-	    TEXT("Preloading CharacterName: %s, ModuleType: %s, resolved BackendType: %s"),
+	    TEXT("Preloading CharacterName: %s, ModuleType: %s, resolved BackendType: %s, ForceRequestedBackend: %s"),
 	    *CharacterName,
 	    *UEnum::GetValueAsString(ModuleType),
-	    *UEnum::GetValueAsString(BackendType)
+	    *UEnum::GetValueAsString(BackendType),
+	    Request.bForceRequestedBackend ? TEXT("true") : TEXT("false")
 	);
 
 	// Capture subsystem pointers on game thread — the ::Get() methods access UObject internals
@@ -442,17 +494,20 @@ void UThespeonComponent::RunPreloadRequest(PreloadRequest Request)
 
 			if (!PreloadGroupId.IsEmpty())
 			{
-				if (!bSuccess)
+				int32* CountPtr = WeakThis->PreloadGroupPendingCounts.Find(PreloadGroupId);
+				if (CountPtr)
 				{
-					WeakThis->PreloadGroupHadFailure[PreloadGroupId] = true;
-				}
-				int32& Count = WeakThis->PreloadGroupPendingCounts[PreloadGroupId];
-				if (--Count == 0)
-				{
-					const bool bAllSucceeded = !WeakThis->PreloadGroupHadFailure[PreloadGroupId];
-					WeakThis->PreloadGroupPendingCounts.Remove(PreloadGroupId);
-					WeakThis->PreloadGroupHadFailure.Remove(PreloadGroupId);
-					WeakThis->OnPreloadGroupComplete.Broadcast(PreloadGroupId, bAllSucceeded);
+					if (!bSuccess)
+					{
+						WeakThis->PreloadGroupHadFailure.FindOrAdd(PreloadGroupId) = true;
+					}
+					if (--(*CountPtr) == 0)
+					{
+						const bool bAllSucceeded = !WeakThis->PreloadGroupHadFailure.FindRef(PreloadGroupId);
+						WeakThis->PreloadGroupPendingCounts.Remove(PreloadGroupId);
+						WeakThis->PreloadGroupHadFailure.Remove(PreloadGroupId);
+						WeakThis->OnPreloadGroupComplete.Broadcast(PreloadGroupId, bAllSucceeded);
+					}
 				}
 			}
 
@@ -462,7 +517,7 @@ void UThespeonComponent::RunPreloadRequest(PreloadRequest Request)
 
 	ActivePreloadCount.fetch_add(1);
 	ActivePreloadSessions.Add(TUniquePtr<Thespeon::Inference::FPreloadSession, FPreloadSessionDeleter>(new Thespeon::Inference::FPreloadSession(
-	    CharacterName, ModuleType, BackendType, WorkloadMgr, ModuleMgr, LookupMgr, ManifestMgr, MoveTemp(OnComplete)
+	    CharacterName, ModuleType, BackendType, Request.bForceRequestedBackend, WorkloadMgr, ModuleMgr, LookupMgr, ManifestMgr, MoveTemp(OnComplete)
 	)));
 	PreloadThreads.Emplace(FRunnableThread::Create(ActivePreloadSessions.Last().Get(), TEXT("ThespeonPreloadThread"), 0, TPri_Normal));
 }

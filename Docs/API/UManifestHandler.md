@@ -12,8 +12,8 @@ registry for all imported models.
 
 ### `FindModuleType`
 Matches a string to a module type enum value.
-Accepts both internal strings (e.g., "ultralow", "mid", "ultrahigh")
-and front-end strings (e.g., "XS", "M", "XL").
+Accepts both size tiers (e.g., "XS", "M", "XL") and the legacy quality
+names (e.g., "ultralow", "mid", "ultrahigh").
 
 **Parameters:**
 - `ModuleTypeString`: The string to match against known module type names.
@@ -48,7 +48,7 @@ TSet<FString> GetAllAvailableCharacters();
 ```
 
 ### `GetModuleTypesOfCharacter`
-Returns a mapping of module quality tiers to module ID strings for a character.
+Returns a mapping of module size tiers to module ID strings for a character.
 
 **Parameters:**
 - `CharacterName`: The character name to look up.

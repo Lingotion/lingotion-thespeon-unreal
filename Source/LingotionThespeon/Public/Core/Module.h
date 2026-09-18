@@ -7,7 +7,13 @@
 #include "Containers/Set.h"
 #include "Containers/Map.h"
 #include "Core/BackendType.h"
+#include "HAL/CriticalSection.h"
 #include "NNEModelData.h"
+
+namespace metaonnx
+{
+class MetaGraph;
+}
 
 namespace Thespeon
 {
@@ -21,9 +27,9 @@ namespace Core
  */
 struct FVersion
 {
-	int Major = 0;
-	int Minor = 0;
-	int Patch = 0;
+	int Major = -1;
+	int Minor = -1;
+	int Patch = -1;
 
 	FVersion() = default;
 	FVersion(int InMajor, int InMinor, int InPatch) : Major(InMajor), Minor(InMinor), Patch(InPatch) {}
@@ -37,6 +43,11 @@ struct FVersion
 	FString ToString(bool bPrefixV = true) const
 	{
 		return FString::Printf(TEXT("%s%d.%d.%d"), bPrefixV ? TEXT("v") : TEXT(""), Major, Minor, Patch);
+	}
+
+	bool IsValid() const
+	{
+		return (Major >= 0 && Minor >= 0 && Patch >= 0);
 	}
 
 	bool operator==(const FVersion& Other) const
@@ -179,24 +190,40 @@ class Module
 	/** Semantic version of this module. */
 	Thespeon::Core::FVersion Version;
 
-	/** Set of backend types for which models have been loaded. */
-	TSet<EBackendType> LoadedBackends;
+	/**
+	 * Workload IDs this module actually registered, keyed by the backend that was *requested*.
+	 *
+	 * Recorded at registration rather than re-derived later: a workload ID names the backend its
+	 * instances run on, which a metagraph device pin may make different from the requested one, so
+	 * unload cannot reconstruct these IDs from the requested backend alone.
+	 */
+	TMap<EBackendType, TSet<FString>> RegisteredWorkloads;
 
 	/** Map of internal file identifiers to their file name and extension. */
 	TMap<FString, FModuleFile> InternalFileMappings;
 
 	/**
-	 * @brief Loads ONNX models for this module using the specified backend type.
+	 * @brief Loads ONNX models for this module, keyed by the workload ID each will be pooled under.
 	 *
-	 * Skips models whose MD5 hashes are already present in LoadedMD5s
-	 * to avoid duplicate loading of shared files.
+	 * Skips workload IDs already present in AlreadyRegisteredWorkloadIDs so shared files are not
+	 * loaded twice.
 	 *
-	 * @param LoadedMD5s Set of MD5 hashes for models that are already loaded.
-	 * @param BackendType The NNE backend to use for model inference.
-	 * @param OutLoadedModels Map to populate with loaded model data keyed by model ID.
+	 * @param AlreadyRegisteredWorkloadIDs Workload IDs that already have a pool.
+	 * @param RequestedBackend The NNE backend the caller asked for.
+	 * @param bForceRequestedBackend Ignore metagraph device pins and use RequestedBackend throughout.
+	 * @param OutLoadedModels Map to populate with loaded model data keyed by workload ID.
+	 * @param Priority Forwarded to FStreamableManager::RequestAsyncLoad. Use 0 for default, 100 for high
+	 *                 (FStreamableManager::AsyncLoadHighPriority). Used so that a synth-triggered load can
+	 *                 jump ahead of in-flight preload loads in the streamable manager's queue.
 	 * @return True if all models were loaded successfully, false otherwise.
 	 */
-	bool LoadModels(const TSet<FString>& LoadedMD5s, EBackendType BackendType, TMap<FString, TStrongObjectPtr<UNNEModelData>>& OutLoadedModels) const;
+	bool LoadModels(
+	    const TSet<FString>& AlreadyRegisteredWorkloadIDs,
+	    EBackendType RequestedBackend,
+	    bool bForceRequestedBackend,
+	    TMap<FString, TStrongObjectPtr<UNNEModelData>>& OutLoadedModels,
+	    int32 Priority = 0
+	) const;
 
 	/**
 	 * @brief Resolves an internal file name to its model ID (content path).
@@ -207,13 +234,49 @@ class Module
 	FString GetInternalModelID(const FString& InternalName) const;
 
 	/**
-	 * @brief Adds the workload IDs for all models in this module to the output set.
+	 * @brief Returns this module's parsed metagraph, reading and caching it on first call.
+	 * Immutable once parsed, so a single* instance is shared by every caller.
 	 *
-	 * @param BackendType The backend type to resolve workload IDs for.
-	 * @param OutWorkloadIDs Output set to populate with workload ID strings.
-	 * @return True if workload IDs were added successfully, false otherwise.
+	 * Safe to call from any thread.
+	 *
+	 * @return The parsed graph, or nullptr if this module declares no metagraph file or the
+	 *         file could not be read.
 	 */
-	bool AddLoadedWorkloadIDs(EBackendType BackendType, TSet<FString>& OutWorkloadIDs) const;
+	TSharedPtr<const metaonnx::MetaGraph, ESPMode::ThreadSafe> GetMetaGraph() const;
+
+	/**
+	 * @brief Returns the backend the given metagraph node must run on.
+	 *
+	 * @param NodeID The metagraph node id, which is also its InternalFileMappings key.
+	 * @param RequestedBackend The backend the caller asked for.
+	 * @param bForceRequestedBackend Ignore any declared device and return RequestedBackend.
+	 * @return The effective backend, or EBackendType::None if the metagraph could not be read.
+	 */
+	EBackendType ResolveNodeBackend(const FString& NodeID, EBackendType RequestedBackend, bool bForceRequestedBackend) const;
+
+	/**
+	 * @brief Resolves the workload ID (pool identity) for the given metagraph node.
+	 *
+	 * The ID names the node's effective backend, not the requested one, so nodes that declare
+	 * different devices get separate pools instead of contending for one.
+	 *
+	 * @param NodeID The metagraph node id, which is also its InternalFileMappings key.
+	 * @param RequestedBackend The backend the caller asked for.
+	 * @param bForceRequestedBackend Ignore any declared device and use RequestedBackend.
+	 * @param OutWorkloadID Receives the resolved workload ID.
+	 * @return False if the node is unknown or the backend could not be resolved.
+	 */
+	bool TryGetNodeWorkloadID(const FString& NodeID, EBackendType RequestedBackend, bool bForceRequestedBackend, FString& OutWorkloadID) const;
+
+	/**
+	 * @brief Returns every workload this module needs on the given requested backend.
+	 *
+	 * @param RequestedBackend The backend the caller asked for.
+	 * @param bForceRequestedBackend Ignore metagraph device pins and use RequestedBackend throughout.
+	 * @param OutWorkloads Receives workload ID -> effective backend for every model in this module.
+	 * @return False if the metagraph could not be read, in which case the caller must not register.
+	 */
+	bool GetRequiredWorkloads(EBackendType RequestedBackend, bool bForceRequestedBackend, TMap<FString, EBackendType>& OutWorkloads) const;
 
 	/**
 	 * @brief Returns all file names associated with this module.
@@ -228,25 +291,6 @@ class Module
 	 * @return The module type string.
 	 */
 	virtual FString GetModuleType() const = 0;
-
-	/**
-	 * @brief Returns all workload MD5 hashes for this module.
-	 *
-	 * @return A set of all workload MD5 hash strings.
-	 */
-	virtual TSet<FString> GetAllWorkloadMD5s() const = 0;
-
-	/**
-	 * @brief Checks if this module is fully included in the provided set of MD5 hashes.
-	 *
-	 * Used to determine whether all required model files for a given backend
-	 * type are already loaded.
-	 *
-	 * @param MD5s The set of MD5 hashes to check against.
-	 * @param BackendType The backend type to check inclusion for.
-	 * @return True if all required files are present in the MD5 set, false otherwise.
-	 */
-	virtual bool IsIncludedIn(const TSet<FString>& MD5s, EBackendType BackendType) const = 0;
 
   protected:
 	/**
@@ -277,7 +321,12 @@ class Module
 	 * @param OutLoadedModels Array to populate with the loaded model data.
 	 * @return True if all models were loaded successfully, false otherwise.
 	 */
-	static bool LoadModelsAsync(const TArray<FSoftObjectPath>& SoftPaths, TArray<TStrongObjectPtr<UNNEModelData>>& OutLoadedModels);
+	static bool
+	LoadModelsAsync(const TArray<FSoftObjectPath>& SoftPaths, TArray<TStrongObjectPtr<UNNEModelData>>& OutLoadedModels, int32 Priority = 0);
+
+	mutable TSharedPtr<const metaonnx::MetaGraph, ESPMode::ThreadSafe> CachedMetaGraph;
+
+	mutable FRWLock MetaGraphLock;
 };
 
 /**

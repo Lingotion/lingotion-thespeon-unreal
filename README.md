@@ -7,6 +7,7 @@
 
 <a target="_blank" href="https://discord.gg/9f2HFyu5gF"><img src="https://dcbadge.limes.pink/api/server/https://discord.gg/9f2HFyu5gF" alt="Join our Discord server" /></a>
 
+[Also available on FAB!](https://www.fab.com/listings/7eed6434-a9f6-4598-94ed-52d7a9666f9e)
 
 **Lingotion Thespeon** is an Unreal Engine plugin for on-device AI text-to-speech synthesis. It generates real-time character voiceovers with emotional control, running entirely offline on the player's device with no cloud costs or network dependencies.
 

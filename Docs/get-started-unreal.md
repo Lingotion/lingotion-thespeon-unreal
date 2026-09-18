@@ -82,12 +82,12 @@ Thespeon has its own information window that displays an overview of installed c
 Now everything is set up to start using Lingotion Thespeon to generate voices!
 
 ## Run the _GUISample_ level
-The quickest way to test Lingotion Thespeon is to try the GUISample Level included in the plugin. Navigate to `Content Browser > Plugins > Lingotion Thespeon > Samples > GUISample > GUISample Scene` and open the level. 
+The quickest way to test Lingotion Thespeon is to try the GUISample Level included in the plugin. Navigate to `Content Browser > Plugins > Lingotion Thespeon > Samples > LingotionGUISample > L_LingotionGUISample` and open the level. 
 
 Press play, and you should see a simple UI where you can generate audio from an input text. 
 
 > [!IMPORTANT]
-> The first time each character is synthesized from will have significantly slower performance due to buffer allocations. We recommend pre-loading characters with a mock-synthesis before regular use - see how it is done in the Level Blueprint of the GUISample scene.
+> The first time each character is synthesized from will have significantly slower performance due to buffer allocations. We recommend pre-loading characters with a mock-synthesis before regular use.
 
 ---
 
@@ -331,7 +331,7 @@ For an in-depth explanation of every feature -- character control, delegates, co
 
 The plugin also ships with several example scenes and code samples under `Content Browser > Plugins > Lingotion Thespeon > Samples`. These samples are the primary implementation reference:
 
-- **GUISample** -- Interactive UI example demonstrating the `UThespeonComponent`, including character preloading. Check the Level Blueprint for details.
+- **LingotionGUISample** -- Interactive UI example demonstrating the `UThespeonComponent`, including character preloading.
 - **MinimalCharacterSample** -- Blueprint-based guide on basic use of Thespeon, found in the Level Blueprint.
 - **MinimalActorExample** -- C++ Actor-based guide on basic use of Thespeon. Under Plugins > Lingotion Thespeon C++ Classes you will find the ready-made actor class SimpleThespeonActor which can be dropped into a level.
 - **AngelDevilDemoActor** -- Advanced C++ Actor demonstrating multi-character concurrent synthesis with different emotions. Drop it into any level from Plugins > Lingotion Thespeon C++ Classes to try it out.

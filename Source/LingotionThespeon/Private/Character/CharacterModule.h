@@ -38,16 +38,6 @@ class CharacterModule : public Thespeon::Core::Module
 		return TEXT("character");
 	}
 
-	/** @brief Gets all MD5s of the workload files in this module.
-	 *  @return Set of MD5 hash strings for every workload file in this module. */
-	TSet<FString> GetAllWorkloadMD5s() const override;
-
-	/** @brief Checks if this module's files are fully included in the provided MD5 set for the given backend.
-	 *  @param MD5s Set of MD5 hashes to check against.
-	 *  @param BackendType The backend type to check for.
-	 *  @return True if all module files are present in MD5s. */
-	bool IsIncludedIn(const TSet<FString>& MD5s, EBackendType BackendType) const override;
-
 	/**
 	 * @brief Encodes a phoneme string into neural network input IDs.
 	 * @param Phonemes The phoneme string to encode.

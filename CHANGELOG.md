@@ -1,3 +1,26 @@
+# [1.2.0] - 2026-09-15
+This version requires updated character and language modules, please re-download your characters to enable the new functionality.
+
+## Added
+* Added interpolation of emotions over time by setting the `StartEmotion` and `EndEmotion` parameters of a `FLingotionInputSegment`.
+* Added blending of emotions, which combined with the interpolation makes it possible to blend emotions over time.
+* Added speeds input parameters
+* Added loudness input parameters
+* New GUI Sample with refreshed interface that showcases emotion blending.
+* Additional instructions on how to get started with plugin.
+* Added fallback for languages in the case that a specific language module does not exist.
+
+## Changed
+* It is now possible to preload on multiple backends at the same time.
+
+## Removed
+* Removed the old GUISample level
+
+## Fixed
+* Fixed an issue on Windows where running synth on GPU sometimes would produce garbage in the end of the audio.
+* Fixed a crash when exiting Play mode during preload
+* Adjusted gain level for `AudioStreamComponent`
+
 # [1.1.1] - 2026-04-29
 ## Added
 * Concurrent character preloading via GUI sample.

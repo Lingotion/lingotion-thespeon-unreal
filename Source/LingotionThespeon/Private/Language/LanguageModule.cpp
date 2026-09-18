@@ -119,7 +119,8 @@ void Thespeon::Language::LanguageModule::LoadVocabularies(const TSharedPtr<FJson
 	{
 		for (const auto& VocabPair : (*VocabulariesPtr)->Values)
 		{
-			const FString& VocabName = VocabPair.Key;
+			// UE 5.8 stores FJsonObject keys as UE::FSharedString, so copy into an FString rather than binding a reference.
+			const FString VocabName(*VocabPair.Key);
 			TSharedPtr<FJsonObject> VocabObj = VocabPair.Value->AsObject();
 
 			if (!VocabObj.IsValid())
@@ -134,7 +135,7 @@ void Thespeon::Language::LanguageModule::LoadVocabularies(const TSharedPtr<FJson
 					double Value = 0.0;
 					if (Pair.Value->TryGetNumber(Value))
 					{
-						GraphemeToID.Add(Pair.Key, static_cast<int64>(Value));
+						GraphemeToID.Add(FString(*Pair.Key), static_cast<int64>(Value));
 					}
 				}
 			}
@@ -145,7 +146,7 @@ void Thespeon::Language::LanguageModule::LoadVocabularies(const TSharedPtr<FJson
 					double Value = 0.0;
 					if (Pair.Value->TryGetNumber(Value))
 					{
-						PhonemeToID.Add(Pair.Key, static_cast<int64>(Value));
+						PhonemeToID.Add(FString(*Pair.Key), static_cast<int64>(Value));
 					}
 				}
 			}
@@ -179,22 +180,6 @@ void Thespeon::Language::LanguageModule::LoadVocabularies(const TSharedPtr<FJson
 		LINGO_LOG(EVerbosityLevel::Error, TEXT("Grapheme or phoneme vocabularies are not defined in the module"));
 		return;
 	}
-}
-
-TSet<FString> Thespeon::Language::LanguageModule::GetAllWorkloadMD5s() const
-{
-	TSet<FString> AllMD5s;
-
-	// Collect MD5s from internal file mappings
-	for (const auto& FilePair : InternalFileMappings)
-	{
-		if (FilePair.Key != TEXT("lookuptable")) // Exclude lookuptable from workload MD5s as it's not a runtime workload file
-		{
-			AllMD5s.Add(FilePair.Value.FileName);
-		}
-	}
-
-	return AllMD5s;
 }
 
 // Encodes a text string into grapheme IDs character-by-character for G2P model input.
@@ -307,7 +292,8 @@ TMap<FString, FString> Thespeon::Language::LanguageModule::GetLookupTable()
 	// Convert JSON object to TMap, excluding license_terms
 	for (const auto& Pair : JsonObject->Values)
 	{
-		if (Pair.Key.Equals(TEXT("license_terms"), ESearchCase::IgnoreCase))
+		const FString Key(*Pair.Key);
+		if (Key.Equals(TEXT("license_terms"), ESearchCase::IgnoreCase))
 		{
 			continue; // Skip license terms
 		}
@@ -315,42 +301,17 @@ TMap<FString, FString> Thespeon::Language::LanguageModule::GetLookupTable()
 		FString Value;
 		if (Pair.Value->TryGetString(Value))
 		{
-			Result.Add(Pair.Key, Value);
+			Result.Add(Key, Value);
 		}
 		else
 		{
-			LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Could not convert value for key '%s' to string"), *Pair.Key);
+			LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Could not convert value for key '%s' to string"), *Key);
 		}
 	}
 
 	LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Successfully loaded %d entries from lookup table for module %s"), Result.Num(), *ModuleID);
 
 	return Result;
-}
-
-// Checks whether all model files (excluding the lookuptable, which is not an ONNX model)
-// are registered as workloads on the given backend. Used to determine if the module is fully loaded.
-bool Thespeon::Language::LanguageModule::IsIncludedIn(const TSet<FString>& WorkloadIDs, EBackendType BackendType) const
-{
-	// Check if all files in this module (except lookuptable) are present in the provided MD5 set - matching Unity behavior
-	for (const auto& FilePair : InternalFileMappings)
-	{
-		FString WorkloadID;
-		if (!Thespeon::Core::TryGetRuntimeWorkloadID(FilePair.Value.FileName, BackendType, WorkloadID))
-		{
-			LINGO_LOG(
-			    EVerbosityLevel::Error,
-			    TEXT("Could not get WorkloadID for file md5 '%s' on backend '%s'."),
-			    *FilePair.Value.FileName,
-			    *UEnum::GetValueAsString(BackendType)
-			);
-		}
-		if (FilePair.Key != TEXT("lookuptable") && !WorkloadIDs.Contains(WorkloadID))
-		{
-			return false;
-		}
-	}
-	return true;
 }
 
 FString Thespeon::Language::LanguageModule::GetLookupTableID() const
