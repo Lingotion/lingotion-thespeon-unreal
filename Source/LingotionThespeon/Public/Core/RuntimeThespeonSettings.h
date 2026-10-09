@@ -8,7 +8,7 @@
 #include "RuntimeThespeonSettings.generated.h"
 
 /**
- * Verbosity level for Lingotion Thespeon logging. Each level includes all levels above it.
+ * Verbosity level for Lingotion Thespeon logging. Each level also includes all less detailed levels (e.g. Info includes Warning and Error).
  */
 UENUM(BlueprintType)
 enum class EVerbosityLevel : uint8
@@ -27,7 +27,7 @@ enum class EVerbosityLevel : uint8
 
 /**
  * Backend selection for settings UI. Mirrors EBackendType but without the None/Default option,
- * since settings must specify a concrete backend.
+ * since settings must specify a concrete backend. GPU is Windows-only; other platforms fall back to CPU with a warning.
  */
 UENUM(BlueprintType)
 enum class ESettingBackendType : uint8
@@ -39,8 +39,8 @@ enum class ESettingBackendType : uint8
 };
 
 /**
- * Thread Priority enum which controls the priority of synthesis threads. A higher priority will enable real time generation at the cost of higher
- * resource use.
+ * Controls the OS priority of the synthesis thread. A higher priority helps real-time generation at the cost of higher resource use.
+ * Preload threads always run at normal priority.
  */
 UENUM(BlueprintType)
 enum class EThreadPriorityWrapper : uint8
@@ -65,7 +65,8 @@ enum class EThreadPriorityWrapper : uint8
  * Project-wide default settings for Lingotion Thespeon.
  *
  * Configured via Project Settings > Plugins > Lingotion Thespeon (Runtime).
- * These values are used as fallbacks when no per-component InferenceConfig is specified.
+ * These are the initial values of every newly constructed FInferenceConfig; editing them does not change configs
+ * that already exist. BufferSeconds, and BackendType when a config says Default, are also read at synthesis time.
  */
 UCLASS(Config = Plugins, DefaultConfig, meta = (DisplayName = "Lingotion Thespeon"))
 class LINGOTIONTHESPEON_API URuntimeThespeonSettings : public UDeveloperSettings
@@ -89,7 +90,10 @@ class LINGOTIONTHESPEON_API URuntimeThespeonSettings : public UDeveloperSettings
 	{
 		return GetMutableDefault<URuntimeThespeonSettings>();
 	}
-	/** Number of seconds of audio to buffer before playback begins. Higher values increase latency but reduce stuttering. */
+	/**
+	 * Seconds of audio to buffer before the first OnAudioReceived broadcast. Higher values increase latency but reduce stuttering.
+	 * Always used: per-component InferenceConfig.BufferSeconds values are currently ignored.
+	 */
 	UPROPERTY(Config, EditAnywhere, Category = "Component Configuration", meta = (ClampMin = "0.0"))
 	float BufferSeconds = 0.5f;
 
@@ -99,17 +103,20 @@ class LINGOTIONTHESPEON_API URuntimeThespeonSettings : public UDeveloperSettings
 	    EditAnywhere,
 	    Category = "Default Configuration",
 	    DisplayName = "Default Backend",
-	    meta = (ToolTip = "Enter your preferred default backend for inference. Applies when no local backend is specified in the inference config.")
+	    meta =
+	        (ToolTip =
+	             "Select the default backend for inference. GPU is Windows-only; other platforms fall back to CPU. Applies when no local backend is specified in the inference config."
+	        )
 	)
 	ESettingBackendType BackendType = ESettingBackendType::CPU;
 
-	/** Default model quality tier. Applies when no module type is specified in a per-component InferenceConfig. */
+	/** Default character module size tier (XS to XL). Applies when no module type is specified in a per-component InferenceConfig. */
 	UPROPERTY(
 	    Config,
 	    EditAnywhere,
 	    Category = "Default Configuration",
 	    DisplayName = "Default Module Type",
-	    meta = (ToolTip = "Enter your preferred default module type for inference. Applies when no module type is specified in the inference config.")
+	    meta = (ToolTip = "Select the default module type for inference. Applies when no module type is specified in the inference config.")
 	)
 	EThespeonModuleType ModuleType = EThespeonModuleType::L;
 
@@ -119,7 +126,7 @@ class LINGOTIONTHESPEON_API URuntimeThespeonSettings : public UDeveloperSettings
 	    EditAnywhere,
 	    Category = "Default Configuration",
 	    DisplayName = "Default Emotion",
-	    meta = (ToolTip = "Enter your preferred default emotion for inference. Applies when no emotion is specified in the inference config.")
+	    meta = (ToolTip = "Select the default emotion for inference. Applies when no emotion is specified in the inference config.")
 	)
 	EEmotion Emotion = EEmotion::Interest;
 
@@ -129,11 +136,12 @@ class LINGOTIONTHESPEON_API URuntimeThespeonSettings : public UDeveloperSettings
 	    EditAnywhere,
 	    Category = "Default Configuration",
 	    DisplayName = "Default Language",
-	    meta = (ToolTip = "Enter your preferred default language for inference. Applies when no language is specified in the inference config.")
+	    meta = (ToolTip = "Set the default language for inference. Applies when no language is specified in the inference config.")
 	)
 	FLingotionLanguage Language = FLingotionLanguage(TEXT("eng"));
 
-	/** Thread priority for inference processing threads. Higher priority enables real-time generation at the cost of higher resource use. */
+	/** Thread priority for the synthesis thread (preload threads run at normal priority). Higher priority helps real-time generation at the cost of
+	 * higher resource use. */
 	UPROPERTY(
 	    Config,
 	    EditAnywhere,
@@ -141,8 +149,7 @@ class LINGOTIONTHESPEON_API URuntimeThespeonSettings : public UDeveloperSettings
 	    DisplayName = "Default Inference Thread Priority",
 	    meta =
 	        (ToolTip =
-	             "Sets the thread priority for inference processing threads. Higher priority will enable real time generation at the cost of higher resource use."
-	        )
+	             "Sets the thread priority for the synthesis thread. Higher priority helps real-time generation at the cost of higher resource use.")
 	)
 	EThreadPriorityWrapper ThreadPriority = EThreadPriorityWrapper::AboveNormal;
 

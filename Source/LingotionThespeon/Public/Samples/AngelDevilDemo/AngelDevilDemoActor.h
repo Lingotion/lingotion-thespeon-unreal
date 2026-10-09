@@ -7,7 +7,7 @@
 #include "Core/ModelInput.h"
 #include "Engine/InferenceConfig.h"
 #include "Utils/AudioStreamComponent.h"
-#include "AAngelDevilDemoActor.generated.h"
+#include "AngelDevilDemoActor.generated.h"
 
 class UThespeonComponent;
 
@@ -35,16 +35,19 @@ struct FRoleEntry
 
 	// --- Editable config ---
 
+	/** Imported character name that voices this role. */
 	UPROPERTY(EditAnywhere, Category = "Config")
 	FString Character;
 
+	/** Emotion applied to the whole line. */
 	UPROPERTY(EditAnywhere, Category = "Config")
 	EEmotion Emotion = EEmotion::None;
 
+	/** The line this role speaks. */
 	UPROPERTY(EditAnywhere, Category = "Config")
 	FString Text;
 
-	// --- Runtime state (not reflected; reset each session) ---
+	// --- Runtime state (not reflected): preload fields are set in BeginPlay, synth fields reset when the role starts speaking ---
 
 	EDemoStatus PreloadStatus = EDemoStatus::Idle;
 	double PreloadElapsed = 0.0;
@@ -56,12 +59,15 @@ struct FRoleEntry
 /**
  * Demo actor: "Angel and Devil on Your Shoulder"
  *
- * Three characters respond to a moral dilemma simultaneously, each with a different emotion:
- *   - Person (Aaron Archer)  — neutral, pondering the question
- *   - Angel  (Deryn Oliver)  — serene, giving kind advice
- *   - Devil  (Vladrus)       — angry, giving aggressive advice
+ * Three roles respond to a moral dilemma simultaneously, each with a different emotion:
+ *   - Person — Interest, asking the question
+ *   - Angel  — Serenity, giving kind advice
+ *   - Devil  — Anger, giving aggressive advice
  *
- * Drop into a level and press Play. All 3 characters preload concurrently.
+ * By default all three roles use Aaron Archer. Set each role's Character under
+ * Demo Config > Roles in the Details panel to hear three different voices.
+ *
+ * Drop into a level and press Play. All 3 roles preload concurrently.
  * Press 4 to trigger all 3 to speak at the same time with different emotions.
  *
  * Press 1/2/3 = synth Person / Angel / Devil individually
@@ -91,17 +97,21 @@ class LINGOTIONTHESPEON_API AAngelDevilDemoActor : public AActor
 
 	// ---- Per-role config and runtime state ----
 
+	/** Exactly 3 entries, in the order Person, Angel, Devil. Do not add or remove entries. */
 	UPROPERTY(EditAnywhere, Category = "Demo Config")
 	TArray<FRoleEntry> Roles;
 
 	// ---- Shared config ----
 
+	/** Module quality tier used by all three roles. */
 	UPROPERTY(EditAnywhere, Category = "Demo Config")
 	EThespeonModuleType ModuleType = EThespeonModuleType::M;
 
+	/** Language used by all roles. If left empty, English ("eng") is used. */
 	UPROPERTY(EditAnywhere, Category = "Demo Config")
 	FLingotionLanguage Language;
 
+	/** When true, all three roles speak at once (as if 4 were pressed) as soon as every preload has succeeded. */
 	UPROPERTY(EditAnywhere, Category = "Demo Config")
 	bool bAutoSynthesizeOnPreloadComplete = false;
 

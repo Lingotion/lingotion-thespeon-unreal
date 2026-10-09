@@ -11,10 +11,11 @@ namespace Thespeon
 namespace Inference
 {
 /**
+ * Per-synthesis usage statistics for the editor.
  *
  * Keyed by character module ID; each inner map holds string keys (nbrSynths, lowercased emotion
- * names, and the blend-cardinality buckets blend1/blend2/blend3plus) to floating-point counts.
- * Counts are stored as doubles because per-emotion marginals accumulate fractionally.
+ * names, and the blend-cardinality buckets blend1/blend2/blend3plus) to floating-point values.
+ * nbrSynths is 1; the emotion and blend values count characters of text, fractionally for blends.
  */
 struct FThespeonDataCache
 {
@@ -22,7 +23,8 @@ struct FThespeonDataCache
 };
 
 /**
- * Broadcast once per (non-warmup) synthesis with that synthesis's data cache.
+ * Broadcast once per (non-warmup) synthesis with that synthesis's data cache. It is broadcast before
+ * inference runs, so syntheses that later fail or are cancelled are still counted.
  *
  * Always broadcast on the game thread. The editor module owns the single listener.
  */

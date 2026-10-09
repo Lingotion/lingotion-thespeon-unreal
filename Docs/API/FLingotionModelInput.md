@@ -16,21 +16,22 @@ TArray<FLingotionInputSegment> Segments;
 ```
 
 ### `ModuleType`
-Which module type of the current Thespeon character to use for synthesis. Must match an imported character module.
+Which module type of the character to use for synthesis. If None or not imported, InferenceConfig.ModuleType or the first imported type is
+used, with a warning.
 
 ```cpp
 EThespeonModuleType ModuleType;
 ```
 
 ### `CharacterName`
-Name of the Thespeon character to use for synthesis. Must match an imported character module.
+Name of the Thespeon character to use for synthesis. If empty or not imported, the first imported character is used, with a warning.
 
 ```cpp
 FString CharacterName;
 ```
 
 ### `DefaultEmotion`
-Default emotion applied to segments that do not specify their own emotion.
+Emotion used for the whole line when no segment sets an emotion. Otherwise segments without one interpolate from their neighbours.
 
 ```cpp
 EEmotion DefaultEmotion;

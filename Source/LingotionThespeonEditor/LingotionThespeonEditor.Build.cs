@@ -58,8 +58,8 @@ public class LingotionThespeonEditor : ModuleRules
 				"EditorSubsystem",
 				"DirectoryWatcher",
 				"Projects",
-				"PythonScriptPlugin",
-				"AssetTools",
+				"FileUtilities",
+				"AssetRegistry",
 				"ApplicationCore",
 				"HTTP",
 				"EditorScriptingUtilities"

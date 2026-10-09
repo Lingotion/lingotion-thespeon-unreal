@@ -16,22 +16,17 @@ void UEditorThespeonSettings::PostEditChangeProperty(FPropertyChangedEvent& Prop
 
 	if (PropertyChangedEvent.GetPropertyName() == GET_MEMBER_NAME_CHECKED(UEditorThespeonSettings, LicenseKey))
 	{
-		if (LicenseKey.IsEmpty())
+		if (GetLicenseKey().IsEmpty())
 		{
 			ValidationState = ELicenseValidationState::Empty;
 		}
 		else
 		{
-			ValidationState = ELicenseValidationState::None;
-			FEditorLicenseKeyValidator::ValidateLicenseAsync(FEditorLicenseKeyValidator::FOnLicenseValidationResult::CreateLambda(
-			    [](bool bValid)
-			    {
-				    auto* Settings = GetMutableDefault<UEditorThespeonSettings>();
-				    Settings->ValidationState = bValid ? ELicenseValidationState::Valid : ELicenseValidationState::Invalid;
-				    // save new validation state to the ini file
-				    Settings->SaveConfig(CPF_Config, *Settings->GetDefaultConfigFilename());
-			    }
-			));
+			if (ValidationState == ELicenseValidationState::Empty)
+			{
+				ValidationState = ELicenseValidationState::None;
+			}
+			FEditorLicenseKeyValidator::ValidateLicenseAsync(FEditorLicenseKeyValidator::FOnLicenseValidationResult());
 		}
 	}
 }

@@ -34,7 +34,10 @@ class LINGOTIONTHESPEON_API LingotionLogger
 	static FString ParsePrettyFunction(const char* prettyFunction);
 };
 
-/** Logs a formatted message at the given verbosity level. Usage: LINGO_LOG(EVerbosityLevel::Info, TEXT("Value: %d"), 42) */
+/**
+ * Logs a formatted message at the given verbosity level. Usage: LINGO_LOG(EVerbosityLevel::Info, TEXT("Value: %d"), 42)
+ * The message is formatted even when its level is suppressed, so avoid expensive arguments in hot paths.
+ */
 #define LINGO_LOG(Level, Fmt, ...) LingotionLogger::Log(Level, FString::Printf(Fmt, ##__VA_ARGS__))
 
 #if defined(_MSC_VER)

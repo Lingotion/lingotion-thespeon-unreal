@@ -33,7 +33,7 @@ void UEditorFileWatcher::VerifyRuntimeFiles()
 	}
 }
 
-void UEditorFileWatcher::UpdateMappingsInfo()
+void UEditorFileWatcher::UpdateMappingsInfo(bool bForce)
 {
 	VerifyRuntimeFiles();
 
@@ -46,7 +46,7 @@ void UEditorFileWatcher::UpdateMappingsInfo()
 	TArray<FString> JsonFilesToCheck;
 	FM.FindFilesRecursive(JsonFilesToCheck, *RuntimeFileLoader::GetRuntimeFileDir(), TEXT("*.json"), /*Files=*/true, /*Directories=*/false);
 
-	if (JsonFilesToCheck == CachedModuleFiles)
+	if (!bForce && JsonFilesToCheck == CachedModuleFiles)
 	{
 		return;
 	}
@@ -59,52 +59,7 @@ void UEditorFileWatcher::UpdateMappingsInfo()
 
 	FString JsonStr;
 	TSet<FString> Names;
-	for (const FString& File : JsonFilesToCheck)
-	{
-		JsonStr = RuntimeFileLoader::LoadFileAsString(File);
-		if (!JsonStr.IsEmpty())
-
-		{
-			TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonStr);
-			TSharedPtr<FJsonObject> Contents;
-
-			if (FJsonSerializer::Deserialize(Reader, Contents) && Contents.IsValid())
-			{
-				FString Type;
-				if (Contents->TryGetStringField(TEXT("type"), Type))
-				{
-					if (Type == "lara")
-					{
-						ProcessCharacterModule(Contents, Names, File, CharacterModules);
-					}
-					else if (Type == "phonemizer")
-					{
-						ProcessLanguageModule(Contents, Names, File, LanguageModules);
-					}
-					else
-					{
-						LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Invalid config type found, ignoring."));
-						continue;
-					}
-				}
-			}
-		}
-	}
-
-	Root->SetObjectField(TEXT("character_modules"), CharacterModules);
-	Root->SetObjectField(TEXT("language_modules"), LanguageModules);
-	TArray<TSharedPtr<FJsonValue>> ImportedModules;
-	for (const FString& Name : Names)
-	{
-		ImportedModules.Add(MakeShared<FJsonValueString>(Name));
-	}
-	Root->SetArrayField(TEXT("imported"), ImportedModules);
-
-	// Build file usage map: MD5 -> array of module IDs using that file
-	TSharedRef<FJsonObject> FileUsage = MakeShared<FJsonObject>();
-	TMap<FString, TArray<FString>> MD5ToModules; // Maps MD5 hash to list of module IDs
-
-	// Scan all JSON files again to build file usage map
+	TMap<FString, TArray<FString>> MD5ToModules; // Maps MD5 hash to list of module IDs using that file
 	for (const FString& File : JsonFilesToCheck)
 	{
 		JsonStr = RuntimeFileLoader::LoadFileAsString(File);
@@ -120,6 +75,25 @@ void UEditorFileWatcher::UpdateMappingsInfo()
 			continue;
 		}
 
+		// Validate as character or language module
+		FString Type;
+		if (Contents->TryGetStringField(TEXT("type"), Type))
+		{
+			if (Type == "lara")
+			{
+				ProcessCharacterModule(Contents, Names, File, CharacterModules);
+			}
+			else if (Type == "phonemizer")
+			{
+				ProcessLanguageModule(Contents, Names, File, LanguageModules);
+			}
+			else
+			{
+				LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Invalid config type found, ignoring."));
+			}
+		}
+
+		// Record which files the module uses, for the file usage map
 		FString ModuleID;
 		Contents->TryGetStringField(TEXT("source_id"), ModuleID);
 
@@ -153,7 +127,17 @@ void UEditorFileWatcher::UpdateMappingsInfo()
 		}
 	}
 
-	// Convert map to JSON format
+	Root->SetObjectField(TEXT("character_modules"), CharacterModules);
+	Root->SetObjectField(TEXT("language_modules"), LanguageModules);
+	TArray<TSharedPtr<FJsonValue>> ImportedModules;
+	for (const FString& Name : Names)
+	{
+		ImportedModules.Add(MakeShared<FJsonValueString>(Name));
+	}
+	Root->SetArrayField(TEXT("imported"), ImportedModules);
+
+	// Convert file usage map (MD5 -> array of module IDs using that file) to JSON format
+	TSharedRef<FJsonObject> FileUsage = MakeShared<FJsonObject>();
 	for (const auto& Pair : MD5ToModules)
 	{
 		TArray<TSharedPtr<FJsonValue>> ModuleArray;
@@ -170,7 +154,7 @@ void UEditorFileWatcher::UpdateMappingsInfo()
 	FJsonSerializer::Serialize(Root, Writer);
 	const FString& manifestFilePath = RuntimeFileLoader::GetManifestPath();
 	FFileHelper::SaveStringToFile(JsonStr, *manifestFilePath);
-	UManifestHandler::Get()->ReadManifest();
+	UManifestHandler::Get()->ReloadManifestFromDisk();
 }
 
 void UEditorFileWatcher::ProcessCharacterModule(
@@ -285,19 +269,14 @@ void UEditorFileWatcher::ProcessLanguageModule(
 
 void UEditorFileWatcher::OnDirectoryChanged(const TArray<struct FFileChangeData>& FileChanges)
 {
-
-	// filter changes based on type
+	// Rebuild once per batch: an import or delete reports every file it touches in the same batch
 	for (const FFileChangeData& changeData : FileChanges)
 	{
-
-		switch (changeData.Action)
+		if (changeData.Action == FFileChangeData::EFileChangeAction::FCA_Added ||
+		    changeData.Action == FFileChangeData::EFileChangeAction::FCA_Removed)
 		{
-			case FFileChangeData::EFileChangeAction::FCA_Added:
-			case FFileChangeData::EFileChangeAction::FCA_Removed:
-				UpdateMappingsInfo();
-				break;
-			default:
-				break;
+			UpdateMappingsInfo();
+			return;
 		}
 	}
 }

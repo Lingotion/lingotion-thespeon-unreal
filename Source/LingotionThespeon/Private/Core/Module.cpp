@@ -14,6 +14,16 @@
 #include "GenericPlatform/GenericPlatformFile.h"
 #include "Core/meta_graph.pb.h"
 
+namespace
+{
+// Whether a module file mapping is an ONNX model, as opposed to data the module reads itself.
+bool IsModelFile(const FString& FileKey)
+{
+	return !FileKey.Equals(TEXT("lookuptable"), ESearchCase::IgnoreCase) && !FileKey.Equals(TEXT("metagraph"), ESearchCase::IgnoreCase) &&
+	       !FileKey.Equals(TEXT("textpreprocessing"), ESearchCase::IgnoreCase);
+}
+} // namespace
+
 namespace Thespeon
 {
 namespace Core
@@ -45,7 +55,7 @@ bool Module::LoadModels(
 
 	for (const auto& FilePair : InternalFileMappings)
 	{
-		if (FilePair.Key.Equals(TEXT("lookuptable"), ESearchCase::IgnoreCase) || FilePair.Key.Equals(TEXT("metagraph"), ESearchCase::IgnoreCase))
+		if (!IsModelFile(FilePair.Key))
 		{
 			continue;
 		}
@@ -118,36 +128,19 @@ TSharedPtr<const metaonnx::MetaGraph, ESPMode::ThreadSafe> Module::GetMetaGraph(
 		LINGO_LOG(EVerbosityLevel::Error, TEXT("Module '%s' has no metagraph file mapping"), *ModuleID);
 		return nullptr;
 	}
-	const FString GraphPath = Thespeon::Core::IO::RuntimeFileLoader::GetRuntimeFilePath(GraphFile->GetFullFileName());
-
-	TUniquePtr<IFileHandle> GraphHandle = Thespeon::Core::IO::RuntimeFileLoader::LoadFileAsStream(GraphPath);
-	if (!GraphHandle.IsValid())
-	{
-		return nullptr; // LoadFileAsStream already logged the reason
-	}
-
-	const int64 GraphSize = GraphHandle->Size();
-	if (GraphSize <= 0 || GraphSize > MAX_int32)
-	{
-		LINGO_LOG(EVerbosityLevel::Error, TEXT("Metagraph file has unusable size %lld: %s"), GraphSize, *GraphPath);
-		return nullptr;
-	}
-
 	TArray<uint8> GraphBytes;
-	GraphBytes.SetNumUninitialized(static_cast<int32>(GraphSize));
-	if (!GraphHandle->Read(GraphBytes.GetData(), GraphSize))
+	if (!ReadModuleFile(*GraphFile, GraphBytes))
 	{
-		LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to read metagraph file: %s"), *GraphPath);
-		return nullptr;
+		return nullptr; // ReadModuleFile already logged the reason
 	}
 
 	TSharedPtr<metaonnx::MetaGraph, ESPMode::ThreadSafe> ParsedGraph = MakeShared<metaonnx::MetaGraph, ESPMode::ThreadSafe>();
 	if (!ParsedGraph->ParseFromArray(GraphBytes.GetData(), GraphBytes.Num()))
 	{
-		LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to parse metagraph protobuf: %s"), *GraphPath);
+		LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to parse metagraph protobuf: %s"), *GraphFile->GetFullFileName());
 		return nullptr;
 	}
-	LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Parsed metagraph for module '%s' (%lld bytes)"), *ModuleID, GraphSize);
+	LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Parsed metagraph for module '%s' (%d bytes)"), *ModuleID, GraphBytes.Num());
 
 	FWriteScopeLock WriteLock(MetaGraphLock);
 	if (!CachedMetaGraph.IsValid())
@@ -155,6 +148,32 @@ TSharedPtr<const metaonnx::MetaGraph, ESPMode::ThreadSafe> Module::GetMetaGraph(
 		CachedMetaGraph = MoveTemp(ParsedGraph);
 	}
 	return CachedMetaGraph;
+}
+
+bool Module::ReadModuleFile(const FModuleFile& File, TArray<uint8>& OutBytes) const
+{
+	const FString FilePath = Thespeon::Core::IO::RuntimeFileLoader::GetRuntimeFilePath(File.GetFullFileName());
+
+	TUniquePtr<IFileHandle> FileHandle = Thespeon::Core::IO::RuntimeFileLoader::LoadFileAsStream(FilePath);
+	if (!FileHandle.IsValid())
+	{
+		return false; // LoadFileAsStream already logged the reason
+	}
+
+	const int64 FileSize = FileHandle->Size();
+	if (FileSize <= 0 || FileSize > MAX_int32)
+	{
+		LINGO_LOG(EVerbosityLevel::Error, TEXT("File of module '%s' has unusable size %lld: %s"), *ModuleID, FileSize, *FilePath);
+		return false;
+	}
+
+	OutBytes.SetNumUninitialized(static_cast<int32>(FileSize));
+	if (!FileHandle->Read(OutBytes.GetData(), FileSize))
+	{
+		LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to read file of module '%s': %s"), *ModuleID, *FilePath);
+		return false;
+	}
+	return true;
 }
 
 // Dispatches model loading to the unreal async io thread and blocks the calling
@@ -366,7 +385,7 @@ bool Module::TryGetNodeWorkloadID(const FString& NodeID, EBackendType RequestedB
 }
 
 // Enumerates every model this module needs, mapped to the backend its pool must be built on.
-// Non-inference entries (lookuptable, metagraph) are skipped — they have no workload.
+// Non-inference entries (lookuptable, metagraph, textpreprocessing) are skipped — they have no workload.
 //
 // This is also where device declarations are reported. It runs once per module per registration,
 // unlike ResolveNodeBackend which the acquire path re-derives on every node execution.
@@ -382,7 +401,7 @@ bool Module::GetRequiredWorkloads(EBackendType RequestedBackend, bool bForceRequ
 
 	for (const auto& FilePair : InternalFileMappings)
 	{
-		if (FilePair.Key.Equals(TEXT("lookuptable"), ESearchCase::IgnoreCase) || FilePair.Key.Equals(TEXT("metagraph"), ESearchCase::IgnoreCase))
+		if (!IsModelFile(FilePair.Key))
 		{
 			continue;
 		}

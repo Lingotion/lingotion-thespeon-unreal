@@ -5,6 +5,7 @@
 #include "Core/BackendType.h"
 #include "Core/ModelInput.h"
 #include "Engine/InferenceConfig.h"
+#include "Samples/LingotionGUISample/ThespeonDialogueOverlayWidget.h"
 #include "AdvancedThespeonWidget.generated.h"
 
 class UButton;
@@ -23,10 +24,12 @@ class UThespeonDialogueOverlayWidget;
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnAdvancedThespeonStateChanged);
 
 /**
- * C++ controller for the LingotionGUISample sample. The Widget Blueprint supplies layout and styling.
+ * C++ controller for the LingotionGUISample (W_ThespeonGUI). The Widget Blueprint supplies layout and styling.
  *
- * Configures a single line of dialog (text, start/end emotion blend, start/end speed and
- * loudness) and hands it to a hosted UThespeonDialogueOverlayWidget for synthesis and playback.
+ * Edits a line of dialogue as one or more segments (text, language, start/end emotion blend, start/end
+ * speed and loudness), plus the character, module type and backend, and hands it to the hosted
+ * UThespeonDialogueOverlayWidget for synthesis and playback. Ctrl+D toggles the multi-segment
+ * developer controls, which are shown by default.
  */
 UCLASS(Abstract, Blueprintable)
 class LINGOTIONTHESPEON_API UAdvancedThespeonWidget : public UUserWidget
@@ -34,13 +37,15 @@ class LINGOTIONTHESPEON_API UAdvancedThespeonWidget : public UUserWidget
 	GENERATED_BODY()
 
   public:
+	/** Builds the model input from all Segments. The first segment supplies DefaultLanguage and DefaultEmotion (its dominant start emotion). */
 	UFUNCTION(BlueprintPure, Category = "Lingotion Thespeon|Advanced GUI")
 	FLingotionModelInput BuildModelInput() const;
 
+	/** Builds the inference config from the selected backend and module type, with the input's defaults as fallbacks. */
 	UFUNCTION(BlueprintPure, Category = "Lingotion Thespeon|Advanced GUI")
 	FInferenceConfig BuildInferenceConfig() const;
 
-	/** Applies an emotion map produced by the emotion editor modal to the start or end of the line. */
+	/** Applies an emotion map produced by the emotion editor modal to the start or end of the currently selected segment. */
 	void ApplyEmotionMap(bool bForStart, const TMap<EEmotion, float>& EmotionMap);
 
 	UPROPERTY(BlueprintAssignable, Category = "Lingotion Thespeon|Advanced GUI")
@@ -52,7 +57,11 @@ class LINGOTIONTHESPEON_API UAdvancedThespeonWidget : public UUserWidget
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lingotion Thespeon|Advanced GUI|State")
 	EThespeonModuleType ModuleType = EThespeonModuleType::None;
 
-	/** All segments of the line. In the default (non-developer) mode only the first is ever used. */
+	/**
+	 * All segments of the line. Outside developer mode only the first is used; leaving developer mode merges
+	 * every segment's text into the first and removes the rest. The first segment's speed and loudness are
+	 * seeded from the spin boxes on construct.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lingotion Thespeon|Advanced GUI|State")
 	TArray<FLingotionInputSegment> Segments;
 
@@ -69,6 +78,8 @@ class LINGOTIONTHESPEON_API UAdvancedThespeonWidget : public UUserWidget
 	// Preview (tunneling) so Ctrl+D is caught even while the input text box holds keyboard focus.
 	virtual FReply NativeOnPreviewKeyDown(const FGeometry& InGeometry, const FKeyEvent& InKeyEvent) override;
 
+	/** Portrait per character name. Matched exactly first, then trimmed and case-insensitive. Falls back to DefaultCharacterPortrait; with neither,
+	 * the image is hidden. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Lingotion Thespeon|Advanced GUI")
 	TMap<FString, TSoftObjectPtr<UTexture2D>> CharacterPortraits;
 
@@ -76,21 +87,29 @@ class LINGOTIONTHESPEON_API UAdvancedThespeonWidget : public UUserWidget
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Lingotion Thespeon|Advanced GUI")
 	TSoftObjectPtr<UTexture2D> DefaultCharacterPortrait;
 
+	/** Emotion editor modal class. If unset, W_ThespeonEmotionEditorModal is loaded by path. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Lingotion Thespeon|Advanced GUI")
 	TSubclassOf<UThespeonEmotionEditorWidget> EmotionEditorClass;
 
+	/** Prefix for synthesis session IDs, which take the form <Prefix>_<GUID>. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Lingotion Thespeon|Advanced GUI")
 	FString SessionIdPrefix = TEXT("LingotionGUISample");
 
-	/** Widget spawned once per emotion into the start/end summary WrapBoxes. Design a Blueprint subclass to style it graphically. */
+	/**
+	 * Widget spawned once per emotion into the start/end summary WrapBoxes. Design a Blueprint subclass to style it graphically.
+	 * If unset, no summary is shown. An empty blend shows a single None chip.
+	 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Lingotion Thespeon|Advanced GUI")
 	TSubclassOf<UThespeonEmotionChipWidget> EmotionChipClass;
 
-	/** Number of per-emotion chips to show before adding a single overflow "N more X%" chip (total chips may be this + 1). */
+	/** Maximum per-emotion chips before the rest fold into one "N more X%" chip, which is only used when 2 or more would be hidden. Minimum 1. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Lingotion Thespeon|Advanced GUI")
 	int32 MaxSummaryChips = 3;
 
-	/** Per-segment cap on characters in InputTextBox; anything typed or pasted beyond this is discarded. Zero disables the cap. */
+	/**
+	 * Per-segment cap on characters in InputTextBox; anything typed or pasted beyond this is discarded. Zero disables the cap.
+	 * Not enforced on text merged by deleting a segment or leaving developer mode.
+	 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Lingotion Thespeon|Advanced GUI")
 	int32 MaxInputTextLength = 250;
 
@@ -99,10 +118,12 @@ class LINGOTIONTHESPEON_API UAdvancedThespeonWidget : public UUserWidget
 	UPROPERTY(meta = (BindWidget)) TObjectPtr<UComboBoxString> BackendComboBox;
 	UPROPERTY(meta = (BindWidget)) TObjectPtr<UComboBoxString> LanguageComboBox;
 	UPROPERTY(meta = (BindWidget)) TObjectPtr<UImage> CharacterPortrait;
+	// Optional; made SelfHitTestInvisible on construct.
 	UPROPERTY(meta = (BindWidgetOptional)) TObjectPtr<UWidget> GlobalControls;
 	UPROPERTY(meta = (BindWidget)) TObjectPtr<UMultiLineEditableTextBox> InputTextBox;
 	UPROPERTY(meta = (BindWidget)) TObjectPtr<UWrapBox> StartEmotionSummary;
 	UPROPERTY(meta = (BindWidget)) TObjectPtr<UButton> StartEmotionEditButton;
+	// The designer values of the four speed/loudness spin boxes seed the first segment on construct.
 	UPROPERTY(meta = (BindWidget)) TObjectPtr<USpinBox> StartSpeedSpinBox;
 	UPROPERTY(meta = (BindWidget)) TObjectPtr<USpinBox> StartLoudnessSpinBox;
 	UPROPERTY(meta = (BindWidget)) TObjectPtr<UWrapBox> EndEmotionSummary;
@@ -110,11 +131,14 @@ class LINGOTIONTHESPEON_API UAdvancedThespeonWidget : public UUserWidget
 	UPROPERTY(meta = (BindWidget)) TObjectPtr<USpinBox> EndSpeedSpinBox;
 	UPROPERTY(meta = (BindWidget)) TObjectPtr<USpinBox> EndLoudnessSpinBox;
 	UPROPERTY(meta = (BindWidget)) TObjectPtr<UButton> SynthesizeButton;
+	// Optional; shows submit/complete/fail status, in red for errors.
 	UPROPERTY(meta = (BindWidgetOptional)) TObjectPtr<UTextBlock> StatusText;
+	// The overlay that synthesizes and plays the line.
 	UPROPERTY(meta = (BindWidget)) TObjectPtr<UThespeonDialogueOverlayWidget> DialogueOverlay;
 
-	// Developer-mode multi-segment controls. Hidden by default; toggled with Ctrl+D. Optional so the
+	// Developer-mode multi-segment controls. Shown by default (see bDeveloperMode); toggled with Ctrl+D. Optional so the
 	// Blueprint keeps compiling until the matching widgets are added to it.
+
 	// Container holding the buttons/labels below; its visibility is what Ctrl+D toggles.
 	UPROPERTY(meta = (BindWidgetOptional)) TObjectPtr<UWidget> SegmentControl;
 	UPROPERTY(meta = (BindWidgetOptional)) TObjectPtr<UButton> PreviousSegmentButton;
@@ -135,6 +159,7 @@ class LINGOTIONTHESPEON_API UAdvancedThespeonWidget : public UUserWidget
 	UFUNCTION() void OpenStartEmotionEditor();
 	UFUNCTION() void OpenEndEmotionEditor();
 	UFUNCTION() void Synthesize();
+	UFUNCTION() void HandleDialogueEnded(EThespeonDialogueResult Result);
 	UFUNCTION() void SelectPreviousSegment();
 	UFUNCTION() void SelectNextSegment();
 	UFUNCTION() void CreateSegment();
@@ -155,6 +180,7 @@ class LINGOTIONTHESPEON_API UAdvancedThespeonWidget : public UUserWidget
 
 	/** Guarantees Segments has at least one entry and SelectedSegmentIndex is in range; returns the selected segment. */
 	FLingotionInputSegment& GetSelectedSegment();
+	/** Returns a static empty segment if Segments is empty (does not modify the array). */
 	const FLingotionInputSegment& GetSelectedSegment() const;
 	/** Shows/hides the developer-mode segment controls and, when hiding, collapses everything back into one segment. */
 	void ToggleDeveloperMode();
@@ -163,7 +189,7 @@ class LINGOTIONTHESPEON_API UAdvancedThespeonWidget : public UUserWidget
 	FString GetSelectedModuleId() const;
 	static FString LanguageLabel(const FLingotionLanguage& Language);
 
-	/** Rebuilds Container's children as one chip per emotion (dominant first), reflowing instead of overflowing. */
+	/** Rebuilds Container's chips, dominant emotion first, up to MaxSummaryChips plus one overflow chip, reflowing instead of overflowing. */
 	void BuildEmotionChips(UWrapBox* Container, const TMap<EEmotion, float>& EmotionMap);
 	/** Spawns one EmotionChipClass instance for the given emotion/weight into Container. */
 	void AddEmotionChip(UWrapBox* Container, EEmotion Emotion, float Weight);

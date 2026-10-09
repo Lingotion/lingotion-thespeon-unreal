@@ -11,8 +11,9 @@ class UTextBlock;
  * A single emotion "chip" shown in the Advanced GUI start/end emotion summary.
  *
  * Create a Blueprint subclass to design the chip graphically. The summary spawns one instance per
- * emotion in the blend and calls SetChipData(). To drive the visuals, either:
- *   - name a TextBlock "LabelText" and the base fills it with "<Emotion>  <NN>%" automatically, or
+ * emotion in the blend and calls SetChipData(), plus one overflow chip via SetOverflowData() when
+ * emotions are hidden. An empty blend shows a single None chip. To drive the visuals, either:
+ *   - name a TextBlock "LabelText" and the base fills it with "<Emotion>  <NN>%" automatically (None shows no percentage), or
  *   - override the OnChipDataSet event and bind GetEmotionName() / GetWeightPercentText() / GetWeight()
  *     to your own layout (colored background, icon, mini bar, etc.).
  */
@@ -59,7 +60,8 @@ class LINGOTIONTHESPEON_API UThespeonEmotionChipWidget : public UUserWidget
 	FText GetChipLabel() const;
 
   protected:
-	/** Fired after SetChipData stores the values. Override in Blueprint to drive custom visuals. */
+	/** Fired after SetChipData or SetOverflowData stores the values. Override in Blueprint to drive custom visuals; check HiddenCount > 0 to style
+	 * the overflow chip. */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Lingotion Thespeon|Advanced GUI")
 	void OnChipDataSet();
 
@@ -67,12 +69,15 @@ class LINGOTIONTHESPEON_API UThespeonEmotionChipWidget : public UUserWidget
 	UPROPERTY(meta = (BindWidgetOptional))
 	TObjectPtr<UTextBlock> LabelText;
 
+	/** The emotion this chip shows. None for the overflow chip. */
 	UPROPERTY(BlueprintReadOnly, Category = "Lingotion Thespeon|Advanced GUI")
 	EEmotion Emotion = EEmotion::None;
 
+	/** Normalized weight in [0, 1]; for the overflow chip, the hidden emotions' combined weight. */
 	UPROPERTY(BlueprintReadOnly, Category = "Lingotion Thespeon|Advanced GUI")
 	float Weight = 0.0f;
 
+	/** Greater than 0 for the overflow chip: how many emotions it stands in for. */
 	UPROPERTY(BlueprintReadOnly, Category = "Lingotion Thespeon|Advanced GUI")
 	int32 HiddenCount = 0;
 };

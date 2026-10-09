@@ -4,8 +4,8 @@
 
 Identifies a language and dialect using standard linguistic codes.
 Multiple code systems are supported (ISO 639, Glottocode, ISO 3166) to allow
-precise specification of languages and regional dialects. Used as a key in
-character module language mappings. Can be used as a TMap key (provides GetTypeHash).
+precise specification of languages and regional dialects. Matching currently uses only
+ISO639_2 and ISO3166_1. Can be used as a TMap key (provides GetTypeHash).
 A default-constructed instance represents an undefined language ("NOLANG").
 
 ## Properties
@@ -18,14 +18,14 @@ FString ISO639_2;
 ```
 
 ### `ISO639_3`
-ISO 639-3 three-letter language code. More specific than ISO 639-2 for distinguishing individual languages.
+ISO 639-3 three-letter language code. More specific than ISO 639-2 for distinguishing individual languages. Not used by BestLanguageMatch.
 
 ```cpp
 FString ISO639_3;
 ```
 
 ### `Glottocode`
-Glottocode identifier for the language family or dialect (e.g. "stan1293" for Standard English).
+Glottocode identifier for the language family or dialect (e.g. "stan1293" for Standard English). Not used by BestLanguageMatch.
 
 ```cpp
 FString Glottocode;
@@ -39,21 +39,22 @@ FString ISO3166_1;
 ```
 
 ### `ISO3166_2`
-ISO 3166-2 subdivision code (e.g. "US-TX"). Identifies sub-national language variants.
+ISO 3166-2 subdivision code (e.g. "US-TX"). Identifies sub-national language variants. Not used by BestLanguageMatch.
 
 ```cpp
 FString ISO3166_2;
 ```
 
 ### `CustomDialect`
-Free-form dialect identifier for variants not covered by standard codes.
+Free-form dialect identifier for variants not covered by standard codes. Not used by BestLanguageMatch.
 
 ```cpp
 FString CustomDialect;
 ```
 
 ### `Name`
-Human-readable display name, auto-generated from ISO639_2 and ISO3166_1 (e.g. "eng US").
+Human-readable display name, generated from ISO639_2 and ISO3166_1 (e.g. "eng US", or "eng " with a trailing
+space when there is no region). Set only by the constructor and TryParseFromJson; editing the codes does not update it.
 
 ```cpp
 FString Name;

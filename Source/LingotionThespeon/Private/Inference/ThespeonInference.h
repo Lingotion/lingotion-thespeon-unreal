@@ -17,6 +17,7 @@ namespace Language
 {
 class LanguageModule;
 class RuntimeLookupTable;
+class FWordSplitter;
 } // namespace Language
 namespace Character
 {
@@ -86,6 +87,20 @@ class ThespeonInference : public InferenceSession
 	    UManifestHandler* ManifestHandler
 	);
 
+	/** @brief Checks whether a character and module type is fully loaded on the given backend: the character module
+	 *  and every imported language module it references have their workloads registered, and each language module
+	 *  has its lookup table registered. Subsystem pointers must be captured on the game thread by the caller.
+	 *  @return True if everything a preload registers for this character is loaded on that backend. */
+	static bool IsLoaded(
+	    const FString& CharacterName,
+	    const EThespeonModuleType& ModuleType,
+	    EBackendType BackendType,
+	    UInferenceWorkloadManager* InferenceWorkloadManager,
+	    UModuleManager* ModuleManager,
+	    ULookupTableManager* LookupTableManager,
+	    UManifestHandler* ManifestHandler
+	);
+
   private:
 	/**
 	 * Posts an error packet to the packet callback.
@@ -121,31 +136,35 @@ class ThespeonInference : public InferenceSession
 	/**
 	 * Phonemizes a single input segment, turning each word into phonemes and encoding them into encoder tokens.
 	 *
-	 * @param Segment - Input text segment to phonemize
+	 * @param Segment - Preprocessed natural language segment to phonemize
+	 * @param Words - The word definition of the segment's language
 	 * @param CharacterModule - Character module for phoneme encoding table
 	 * @param LookupTable - Runtime lookup table for grapheme-to-phoneme mapping
 	 * @param OutSegmentTokens - Output array of encoded phoneme tokens for the segment
+	 * @param GlobalIndices - Receives the encoder token index of each audio sample request marker in the segment
+	 * @param TextLengthSoFar - Encoder tokens before the segment; advanced past it
 	 * @return true if phonemization succeeded, false otherwise
 	 */
 	bool PhonemizeSegment(
-	    FLingotionInputSegment Segment,
+	    const FLingotionInputSegment& Segment,
+	    const Thespeon::Language::FWordSplitter& Words,
 	    Thespeon::Character::CharacterModule* CharacterModule,
 	    Thespeon::Language::RuntimeLookupTable* LookupTable,
-	    TArray<int64>& SegmentTokens,
+	    TArray<int64>& OutSegmentTokens,
 	    TArray<int64>& GlobalIndices,
 	    int& TextLengthSoFar
 	);
 	/**
 	 * Identifies words in the input text that are not present in the provided lookup table and returns them.
-	 * Text is meant to be a single segment's text and this of a language encompassed by LangModule.
+	 * Text is meant to be a single segment's text, without audio sample request markers.
 	 *
 	 * @param Text - Input text segment to analyze
-	 * @param LangModule - Language module for phoneme encoding table
+	 * @param Words - The word definition of the segment's language
 	 * @param LookupTable - Runtime lookup table for checking word existence.
 	 * @return Array of unknown words not found in the lookup table
 	 */
 	TArray<FString>
-	GetUnknownWords(const FString& Text, Thespeon::Language::LanguageModule* LangModule, Thespeon::Language::RuntimeLookupTable* LookupTable);
+	GetUnknownWords(const FString& Text, const Thespeon::Language::FWordSplitter& Words, Thespeon::Language::RuntimeLookupTable* LookupTable);
 
 	/** Subsystem pointers captured on game thread at construction time */
 	UInferenceWorkloadManager* InferenceWorkloadManager = nullptr;

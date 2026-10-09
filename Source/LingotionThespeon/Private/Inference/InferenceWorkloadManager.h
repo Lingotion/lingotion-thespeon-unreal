@@ -61,7 +61,10 @@ class UInferenceWorkloadManager : public UGameInstanceSubsystem
 	    UModuleManager* InModuleManager
 	); // deregisters all workloads in a module unless used by other module. Uses
 	   // ModuleManager to figure out which are safe to remove. For Beta only do first bit.
-	bool IsRegistered(Thespeon::Core::Module* Module, EBackendType BackendType); // checks if present in map.
+	/** @brief Checks if a module's workloads are registered on the given backend. If BackendType is None, checks any backend.
+	 *  Takes the workloads read lock, so it is safe to call while a preload thread is registering.
+	 *  Must NOT be called while already holding WorkloadsLock — FRWLock is not re-entrant. */
+	bool IsRegistered(Thespeon::Core::Module* Module, EBackendType BackendType) const;
 
 	/** @brief Acquires an exclusive InferenceWorkload for the given model.
 	 *  Returns a pooled instance if available, otherwise creates a new one from the stored IModel.

@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
 	"Version": 4,
-	"VersionName": "1.2.0",
+	"VersionName": "2.0.0",
 	"FriendlyName": "Lingotion Thespeon",
 	"Description": "Lingotion Thespeon is an on-device AI engine designed to generate real-time character acting and voiceovers. The plugin runs entirely offline on the player's device, requiring no cloud costs or network dependencies.",
 	"Category": "AI",
@@ -30,7 +30,6 @@
 	],
   	"Plugins": [
   	  { "Name": "NNERuntimeORT",  "Enabled": true },
-  	  { "Name": "PythonScriptPlugin",  "Enabled": true },
 	  { "Name": "EditorScriptingUtilities", "Enabled": true }
 	]
 }

@@ -8,6 +8,7 @@
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
+#include "Language/UnicodeTables.h"
 
 // Constructs a CharacterModule from a manifest entry. Loads the character JSON file from disk
 // and initializes all runtime data: phoneme-to-encoder-ID vocabulary, language module mappings,
@@ -289,7 +290,7 @@ bool Thespeon::Character::CharacterModule::LoadCharacterConfiguration(const TSha
 
 // Encodes a phoneme string into encoder IDs using PhonemeToEncoderKeys.
 // First attempts to match the entire string as a single vocabulary entry (e.g., multi-char phonemes).
-// Falls back to character-by-character encoding if no full-string match is found.
+// Falls back to symbol-by-symbol (code point) encoding if no full-string match is found.
 // Unknown phonemes are skipped with a warning.
 TArray<int64> Thespeon::Character::CharacterModule::EncodePhonemes(const FString& Phonemes)
 {
@@ -303,11 +304,14 @@ TArray<int64> Thespeon::Character::CharacterModule::EncodePhonemes(const FString
 		return EncodedPhonemes;
 	}
 
-	// If not found as full string, encode character by character
-	for (int32 i = 0; i < Phonemes.Len(); ++i)
+	// If not found as full string, encode symbol by symbol. By code point rather than by TCHAR: a symbol outside
+	// the Basic Multilingual Plane, such as U+1F701 in the symbol table, is two TCHARs in UTF-16, and looking
+	// those up one by one never finds it.
+	for (const int32 CodePoint : Thespeon::Language::CodePoints::FromString(Phonemes))
 	{
-		FString SingleChar = FString::Chr(Phonemes[i]);
-		const int64* EncoderKey = PhonemeToEncoderKeys.Find(SingleChar);
+		FString Symbol;
+		Thespeon::Language::CodePoints::AppendTo(Symbol, CodePoint);
+		const int64* EncoderKey = PhonemeToEncoderKeys.Find(Symbol);
 
 		if (EncoderKey)
 		{
@@ -315,7 +319,7 @@ TArray<int64> Thespeon::Character::CharacterModule::EncodePhonemes(const FString
 		}
 		else
 		{
-			LINGO_LOG(EVerbosityLevel::Warning, TEXT("Phoneme '%s' not found in vocabulary, skipping"), *SingleChar);
+			LINGO_LOG(EVerbosityLevel::Warning, TEXT("Phoneme '%s' not found in vocabulary, skipping"), *Symbol);
 		}
 	}
 

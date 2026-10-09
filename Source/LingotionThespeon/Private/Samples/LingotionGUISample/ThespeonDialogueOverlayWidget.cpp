@@ -141,6 +141,11 @@ bool UThespeonDialogueOverlayWidget::StartDialogue(
 	{
 		return false;
 	}
+	// A previous line may still be generating; cancel it so the new request isn't queued behind it.
+	if (ThespeonComponent->IsSynthesizing())
+	{
+		ThespeonComponent->CancelSynthesis();
+	}
 	PreloadAllModels();
 	ActiveSessionID = SessionID;
 	WordMarkerSampleIndices.Reset();
@@ -169,7 +174,10 @@ bool UThespeonDialogueOverlayWidget::StartDialogue(
 
 void UThespeonDialogueOverlayWidget::CloseDialogue()
 {
-	CloseInternal(true);
+	// Closing during the auto-close delay means playback already finished.
+	const UWorld* World = GetWorld();
+	const bool bPlaybackFinished = World && World->GetTimerManager().IsTimerActive(AutoCloseTimerHandle);
+	CloseInternal(bPlaybackFinished ? EThespeonDialogueResult::Completed : EThespeonDialogueResult::Cancelled);
 }
 
 void UThespeonDialogueOverlayWidget::HandleAudioReceived(const FString ReceivedSessionID, const TArray<float>& SynthesisData)
@@ -193,9 +201,16 @@ void UThespeonDialogueOverlayWidget::HandleAudioSampleRequestReceived(const FStr
 
 void UThespeonDialogueOverlayWidget::HandleSynthesisComplete(const FString CompletedSessionID)
 {
-	if (IsCurrentSession(CompletedSessionID))
+	if (!IsCurrentSession(CompletedSessionID))
 	{
-		bSynthesisComplete = true;
+		return;
+	}
+	bSynthesisComplete = true;
+	// If playback already drained before completion arrived (e.g. an empty final packet), no
+	// further drain event will fire, so finish now instead of waiting forever.
+	if (AudioStreamComponent && AudioStreamComponent->IsBufferEmpty())
+	{
+		HandlePlaybackBufferDrained();
 	}
 }
 
@@ -203,7 +218,7 @@ void UThespeonDialogueOverlayWidget::HandleSynthesisFailed(const FString FailedS
 {
 	if (IsCurrentSession(FailedSessionID))
 	{
-		CloseInternal(false);
+		CloseInternal(EThespeonDialogueResult::Failed);
 	}
 }
 
@@ -321,10 +336,10 @@ void UThespeonDialogueOverlayWidget::ScheduleAutoClose()
 
 void UThespeonDialogueOverlayWidget::AutoCloseDialogue()
 {
-	CloseInternal(false);
+	CloseInternal(EThespeonDialogueResult::Completed);
 }
 
-void UThespeonDialogueOverlayWidget::CloseInternal(const bool bInterruptPlayback)
+void UThespeonDialogueOverlayWidget::CloseInternal(const EThespeonDialogueResult Result)
 {
 	if (bClosing)
 	{
@@ -337,7 +352,7 @@ void UThespeonDialogueOverlayWidget::CloseInternal(const bool bInterruptPlayback
 		World->GetTimerManager().ClearTimer(AutoCloseTimerHandle);
 	}
 	UnbindDelegates();
-	if (bInterruptPlayback)
+	if (Result == EThespeonDialogueResult::Cancelled)
 	{
 		if (ThespeonComponent)
 		{
@@ -349,6 +364,7 @@ void UThespeonDialogueOverlayWidget::CloseInternal(const bool bInterruptPlayback
 		}
 	}
 	SetVisibility(ESlateVisibility::Collapsed);
+	OnDialogueEnded.Broadcast(Result);
 }
 
 void UThespeonDialogueOverlayWidget::BindDelegates()
@@ -437,6 +453,8 @@ void UThespeonDialogueOverlayWidget::DestroyOwnedComponents()
 		ComponentOwnerActor->Destroy();
 		ComponentOwnerActor = nullptr;
 	}
+	// Unregistering the component cancels any in-flight preloads, so request them again on the next component set.
+	bPreloadRequested = false;
 }
 
 void UThespeonDialogueOverlayWidget::PreloadAllModels()

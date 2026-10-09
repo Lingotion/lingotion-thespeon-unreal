@@ -7,7 +7,6 @@
 #include "Inference/ModuleManager.h"
 #include "Containers/Set.h"
 #include "Containers/Map.h"
-#include "Language/TextPreprocessor.h"
 
 bool FLingotionModelInput::ValidateCharacterModule(const EThespeonModuleType FallbackModuleType)
 {
@@ -31,9 +30,19 @@ bool FLingotionModelInput::ValidateCharacterModule(const EThespeonModuleType Fal
 	return true;
 }
 
-// FModelInput is now a struct with inline default constructor
-// No additional implementation needed
 bool FLingotionModelInput::ValidateAndPopulate(
+    const EThespeonModuleType FallbackModuleType, const FLingotionLanguage FallbackLanguage, const EEmotion FallbackEmotion
+)
+{
+	if (!Validate(FallbackModuleType, FallbackLanguage, FallbackEmotion))
+	{
+		return false;
+	}
+	return Thespeon::Core::PopulateEmotionKeypoints(this->Segments, this->DefaultEmotion) && Thespeon::Core::PopulateSpeedKeypoints(this->Segments) &&
+	       Thespeon::Core::PopulateLoudnessKeypoints(this->Segments);
+}
+
+bool FLingotionModelInput::Validate(
     const EThespeonModuleType FallbackModuleType, const FLingotionLanguage FallbackLanguage, const EEmotion FallbackEmotion
 )
 {
@@ -92,19 +101,15 @@ bool FLingotionModelInput::ValidateAndPopulate(
 		);
 	}
 
-	// Process segments - we need to build a new array since splitting can expand segments
-	TArray<FLingotionInputSegment> ProcessedSegments;
-
-	for (int32 Idx = 0; Idx < this->Segments.Num(); ++Idx)
+	for (FLingotionInputSegment& Segment : this->Segments)
 	{
-		FLingotionInputSegment& Segment = this->Segments[Idx];
-		FString CleanedText = FTextPreprocessor::CleanText(Segment.Text, GetSegmentPosition(Idx, this->Segments.Num()));
-		if (CleanedText.IsEmpty())
+		// Text preprocessing, which needs the segment's language module, happens at synthesis. Only what needs no
+		// language rules is checked here.
+		if (Segment.Text.TrimStartAndEnd().IsEmpty())
 		{
 			LINGO_LOG(EVerbosityLevel::Error, TEXT("Segment text cannot be empty. Please make sure each segment has meaningful text content."));
 			return false;
 		}
-		Segment.Text = CleanedText;
 
 		if (Segment.Emotion == EEmotion::None)
 		{
@@ -115,34 +120,9 @@ bool FLingotionModelInput::ValidateAndPopulate(
 		}
 
 		Segment.Language = ResolveSegmentLanguage(Segment, CandidateLanguages);
-
-		// Split segment by numbers - this converts numbers to phonemes in separate CustomPronounced segments
-		// This prevents double-phonemization of already converted numbers
-		TArray<FLingotionInputSegment> SplitSegments = FTextPreprocessor::SplitSegmentByNumbers(Segment);
-		if (SplitSegments.IsEmpty())
-		{
-			LINGO_LOG(EVerbosityLevel::Error, TEXT("Segment preprocessing unexpectedly produced no segments."));
-			return false;
-		}
-		ProcessedSegments.Append(SplitSegments);
-	}
-	if (!Thespeon::Core::PopulateEmotionKeypoints(ProcessedSegments, this->DefaultEmotion))
-	{
-		return false;
-	}
-	if (!Thespeon::Core::PopulateSpeedKeypoints(ProcessedSegments))
-	{
-		return false;
-	}
-	if (!Thespeon::Core::PopulateLoudnessKeypoints(ProcessedSegments))
-	{
-		return false;
 	}
 
-	// Replace original segments with processed (potentially expanded) segments
-	this->Segments = MoveTemp(ProcessedSegments);
-
-	LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("ValidateAndPopulate complete. Total segments after number splitting: %d"), this->Segments.Num());
+	LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Validation complete for %d segments"), this->Segments.Num());
 
 	return true;
 }

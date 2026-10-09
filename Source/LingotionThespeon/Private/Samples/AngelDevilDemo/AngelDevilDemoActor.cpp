@@ -1,6 +1,6 @@
 // Copyright 2025 - 2026 Lingotion AB All Rights Reserved
 
-#include "AAngelDevilDemoActor.h"
+#include "Samples/AngelDevilDemo/AngelDevilDemoActor.h"
 #include "Engine/ThespeonComponent.h"
 #include "Core/LingotionLogger.h"
 #include "Core/ModelInput.h"

@@ -36,6 +36,10 @@ void UAdvancedThespeonWidget::NativeOnInitialized()
 	StartEmotionEditButton->OnClicked.AddUniqueDynamic(this, &ThisClass::OpenStartEmotionEditor);
 	EndEmotionEditButton->OnClicked.AddUniqueDynamic(this, &ThisClass::OpenEndEmotionEditor);
 	SynthesizeButton->OnClicked.AddUniqueDynamic(this, &ThisClass::Synthesize);
+	if (DialogueOverlay)
+	{
+		DialogueOverlay->OnDialogueEnded.AddUniqueDynamic(this, &ThisClass::HandleDialogueEnded);
+	}
 	if (PreviousSegmentButton)
 	{
 		PreviousSegmentButton->OnClicked.AddUniqueDynamic(this, &ThisClass::SelectPreviousSegment);
@@ -91,7 +95,7 @@ FReply UAdvancedThespeonWidget::NativeOnPreviewKeyDown(const FGeometry& InGeomet
 {
 	if (InKeyEvent.IsControlDown() && InKeyEvent.GetKey() == EKeys::D)
 	{
-		LINGO_LOG(EVerbosityLevel::Warning, TEXT("Ctrl+D pressed: toggling developer mode."));
+		LINGO_LOG(EVerbosityLevel::Info, TEXT("Ctrl+D pressed: toggling developer mode."));
 		ToggleDeveloperMode();
 		return FReply::Handled();
 	}
@@ -360,11 +364,10 @@ void UAdvancedThespeonWidget::OpenEmotionEditor(bool bForStart)
 	}
 	if (!DialogClass)
 	{
-		UE_LOG(
-		    LogTemp,
-		    Error,
+		LINGO_LOG(
+		    EVerbosityLevel::Error,
 		    TEXT(
-		        "OpenEmotionEditor failed: EmotionEditorClass is unset and W_ThespeonEmotionEditorModal could not be loaded. Set Emotion Editor Class in WP_ThespeonGUI Class Defaults."
+		        "OpenEmotionEditor failed: EmotionEditorClass is unset and W_ThespeonEmotionEditorModal could not be loaded. Set Emotion Editor Class in W_ThespeonGUI Class Defaults."
 		    )
 		);
 		return;
@@ -382,7 +385,7 @@ void UAdvancedThespeonWidget::OpenEmotionEditor(bool bForStart)
 		Dialog->SetFocus();
 		return;
 	}
-	UE_LOG(LogTemp, Error, TEXT("OpenEmotionEditor failed: CreateWidget returned null for class '%s'."), *GetNameSafe(DialogClass.Get()));
+	LINGO_LOG(EVerbosityLevel::Error, TEXT("OpenEmotionEditor failed: CreateWidget returned null for class '%s'."), *GetNameSafe(DialogClass.Get()));
 }
 
 void UAdvancedThespeonWidget::ApplyEmotionMap(bool bForStart, const TMap<EEmotion, float>& EmotionMap)
@@ -515,8 +518,11 @@ void UAdvancedThespeonWidget::RefreshPortrait()
 	}
 	TArray<FString> ConfiguredNames;
 	CharacterPortraits.GetKeys(ConfiguredNames);
-	UE_LOG(
-	    LogTemp, Warning, TEXT("No portrait resolved for '%s'. Configured keys: [%s]"), *CharacterName, *FString::Join(ConfiguredNames, TEXT(", "))
+	LINGO_LOG(
+	    EVerbosityLevel::Warning,
+	    TEXT("No portrait resolved for '%s'. Configured keys: [%s]"),
+	    *CharacterName,
+	    *FString::Join(ConfiguredNames, TEXT(", "))
 	);
 	CharacterPortrait->SetVisibility(ESlateVisibility::Hidden);
 }
@@ -546,6 +552,22 @@ void UAdvancedThespeonWidget::Synthesize()
 	else
 	{
 		SetStatus(FText::FromString(TEXT("Failed to start dialogue (could not create synthesis components).")), true);
+	}
+}
+
+void UAdvancedThespeonWidget::HandleDialogueEnded(EThespeonDialogueResult Result)
+{
+	switch (Result)
+	{
+		case EThespeonDialogueResult::Completed:
+			SetStatus(FText::FromString(TEXT("Synthesis complete.")));
+			break;
+		case EThespeonDialogueResult::Failed:
+			SetStatus(FText::FromString(TEXT("Synthesis failed. See the output log for details.")), true);
+			break;
+		case EThespeonDialogueResult::Cancelled:
+			SetStatus(FText::FromString(TEXT("Synthesis cancelled.")));
+			break;
 	}
 }
 
@@ -739,9 +761,8 @@ void UAdvancedThespeonWidget::BuildEmotionChips(UWrapBox* Container, const TMap<
 	Container->ClearChildren();
 	if (!EmotionChipClass)
 	{
-		UE_LOG(
-		    LogTemp,
-		    Warning,
+		LINGO_LOG(
+		    EVerbosityLevel::Warning,
 		    TEXT("Emotion summary not shown: EmotionChipClass is unset. Assign it in W_ThespeonGUI Class Defaults to spawn emotion chips.")
 		);
 		return;

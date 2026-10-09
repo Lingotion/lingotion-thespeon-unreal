@@ -5,6 +5,8 @@
 #include "Serialization/JsonReader.h"
 #include "Core/LingotionLogger.h"
 #include "Serialization/JsonSerializer.h"
+#include "Language/TextPreprocessingRules.h"
+#include "Language/UnicodeTables.h"
 
 // Constructs a LanguageModule from a manifest entry. Loads the language JSON file from disk
 // and initializes vocabularies (grapheme→ID, phoneme→ID, ID→phoneme) and the lookup table size.
@@ -104,7 +106,45 @@ bool Thespeon::Language::LanguageModule::ParseJSON(const TSharedPtr<FJsonObject>
 		lookupTableSize = static_cast<int32>(LookupTableSizeValue);
 	}
 
+	LoadTextPreprocessingRules();
+
 	return true;
+}
+
+// Reads and compiles the pack's text preprocessing rules. Missing or invalid rules are logged rather than
+// failing the module, the same as an unreadable metagraph: the module still loads, and synthesis fails with a
+// re-import message when it needs them. There are no built-in fallback rules.
+void Thespeon::Language::LanguageModule::LoadTextPreprocessingRules()
+{
+	const Thespeon::Core::FModuleFile* RulesFile = InternalFileMappings.Find(TEXT("textpreprocessing"));
+	if (!RulesFile)
+	{
+		LINGO_LOG(
+		    EVerbosityLevel::Warning,
+		    TEXT("Language module %s has no text preprocessing rules and cannot be used for synthesis. Please re-import your language pack."),
+		    *ModuleID
+		);
+		return;
+	}
+	TArray<uint8> Bytes;
+	if (!ReadModuleFile(*RulesFile, Bytes))
+	{
+		return; // ReadModuleFile already logged the reason
+	}
+	FString Error;
+	TextPreprocessingRules = FTextPreprocessingRules::Load(Bytes.GetData(), Bytes.Num(), Error);
+	if (!TextPreprocessingRules)
+	{
+		LINGO_LOG(EVerbosityLevel::Error, TEXT("Invalid text preprocessing rules in language module %s: %s"), *ModuleID, *Error);
+		return;
+	}
+	LINGO_LOG_FUNC(
+	    EVerbosityLevel::Info,
+	    TEXT("Loaded text preprocessing rules for %s (language '%s', version %s)"),
+	    *ModuleID,
+	    *TextPreprocessingRules->GetIso639_2(),
+	    *TextPreprocessingRules->GetVersion()
+	);
 }
 
 // Loads three vocabulary maps from the "vocabularies" JSON object:
@@ -188,10 +228,11 @@ TArray<int64> Thespeon::Language::LanguageModule::EncodeGraphemes(const FString&
 {
 	TArray<int64> EncodedGraphemes;
 
-	// Encode character by character - matching Unity behavior
-	for (int32 i = 0; i < Graphemes.Len(); ++i)
+	// Encode code point by code point, so that a grapheme outside the Basic Multilingual Plane is looked up whole
+	for (const int32 CodePoint : CodePoints::FromString(Graphemes))
 	{
-		FString SingleChar = FString::Chr(Graphemes[i]);
+		FString SingleChar;
+		CodePoints::AppendTo(SingleChar, CodePoint);
 		const int64* Key = GraphemeToID.Find(SingleChar);
 
 		if (Key)

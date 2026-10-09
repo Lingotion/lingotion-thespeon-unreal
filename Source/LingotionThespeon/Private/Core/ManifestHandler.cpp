@@ -4,6 +4,7 @@
 #include "CoreMinimal.h"
 #include "Misc/FileHelper.h" // FFileHelper::LoadFileToString
 #include "Misc/Paths.h"      // FPaths::GetBaseFilename / Combine / ProjectDir / etc.
+#include "Misc/ScopeRWLock.h"
 #include "Policies/CondensedJsonPrintPolicy.h"
 #include "JsonObjectConverter.h"
 #include "Engine/Engine.h"
@@ -17,12 +18,15 @@ void UManifestHandler::Initialize(FSubsystemCollectionBase& Collection)
 	Super::Initialize(Collection);
 
 	LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("ManifestHandler initialized."));
-	ReadManifest();
+	ReloadManifestFromDisk();
 }
 
 void UManifestHandler::Deinitialize()
 {
-	Root.Reset();
+	{
+		FWriteScopeLock WriteLock(RootLock);
+		Root.Reset();
+	}
 	Super::Deinitialize();
 }
 
@@ -37,20 +41,25 @@ EThespeonModuleType UManifestHandler::FindModuleType(const FString& ModuleTypeSt
 	return result;
 }
 
-// Reads the manifest JSON from disk and deserializes it into the Root JSON object.
+// Reads the manifest JSON from disk and swaps it in as the data all queries read from.
 // The manifest is the central registry of all imported character and language modules.
-void UManifestHandler::ReadManifest()
+void UManifestHandler::ReloadManifestFromDisk()
 {
 	const FString& FilePath = Thespeon::Core::IO::RuntimeFileLoader::GetManifestPath();
 	LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Reading manifest from: %s"), *FilePath);
+
+	// Parse into a local root and publish it only once it is complete, so a query running on a
+	// worker thread never observes a half-built manifest.
+	TSharedPtr<FJsonObject> NewRoot;
 
 	FString JsonString = Thespeon::Core::IO::RuntimeFileLoader::LoadFileAsString(FilePath);
 	if (!JsonString.IsEmpty())
 	{
 		TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonString);
 
-		if (!(FJsonSerializer::Deserialize(Reader, Root) && Root.IsValid()))
+		if (!(FJsonSerializer::Deserialize(Reader, NewRoot) && NewRoot.IsValid()))
 		{
+			NewRoot.Reset();
 			LINGO_LOG(
 			    EVerbosityLevel::Error,
 			    TEXT(
@@ -59,11 +68,24 @@ void UManifestHandler::ReadManifest()
 			);
 		}
 	}
+
+	// A missing, empty or malformed manifest clears the data instead of leaving the previous
+	// contents in place: keeping them would let a module that has just been deleted keep resolving.
+	{
+		FWriteScopeLock WriteLock(RootLock);
+		Root = MoveTemp(NewRoot);
+	}
 }
 
-bool UManifestHandler::IsRootInvalid() const
+TSharedPtr<FJsonObject> UManifestHandler::GetRootSnapshot() const
 {
-	if (!Root.IsValid())
+	FReadScopeLock ReadLock(RootLock);
+	return Root;
+}
+
+bool UManifestHandler::IsRootInvalid(const TSharedPtr<FJsonObject>& InRoot)
+{
+	if (!InRoot.IsValid())
 	{
 		LINGO_LOG(
 		    EVerbosityLevel::Error,
@@ -74,10 +96,10 @@ bool UManifestHandler::IsRootInvalid() const
 	return false;
 }
 
-bool UManifestHandler::TryGetCharacterModules(TSharedPtr<FJsonObject>& OutCharacterModulesPtr) const
+bool UManifestHandler::TryGetCharacterModules(const TSharedPtr<FJsonObject>& InRoot, TSharedPtr<FJsonObject>& OutCharacterModulesPtr)
 {
 	const TSharedPtr<FJsonObject>* CharacterModulesPtr = nullptr;
-	if (!Root->TryGetObjectField(TEXT("character_modules"), CharacterModulesPtr) || !CharacterModulesPtr)
+	if (!InRoot->TryGetObjectField(TEXT("character_modules"), CharacterModulesPtr) || !CharacterModulesPtr)
 	{
 		LINGO_LOG(
 		    EVerbosityLevel::Error,
@@ -96,7 +118,8 @@ bool UManifestHandler::TryGetCharacterModules(TSharedPtr<FJsonObject>& OutCharac
 // Returns a populated FModuleEntry on match, or an empty entry if not found.
 Thespeon::Core::FModuleEntry UManifestHandler::GetCharacterModuleEntry(const FString& CharacterName, EThespeonModuleType ModuleType) const
 {
-	if (IsRootInvalid())
+	const TSharedPtr<FJsonObject> RootSnapshot = GetRootSnapshot();
+	if (IsRootInvalid(RootSnapshot))
 	{
 		return Thespeon::Core::FModuleEntry(); // Empty if no data
 	}
@@ -111,7 +134,7 @@ Thespeon::Core::FModuleEntry UManifestHandler::GetCharacterModuleEntry(const FSt
 	const FString& RequestedSize = *RequestedSizePtr;
 	// Access character modules
 	TSharedPtr<FJsonObject> CharacterModulesPtr;
-	if (!TryGetCharacterModules(CharacterModulesPtr))
+	if (!TryGetCharacterModules(RootSnapshot, CharacterModulesPtr))
 	{
 		return Thespeon::Core::FModuleEntry(); // Empty
 	}
@@ -180,14 +203,15 @@ Thespeon::Core::FModuleEntry UManifestHandler::GetCharacterModuleEntry(const FSt
 
 Thespeon::Core::FModuleEntry UManifestHandler::GetLanguageModuleEntry(const FString& ModuleName) const
 {
-	if (IsRootInvalid())
+	const TSharedPtr<FJsonObject> RootSnapshot = GetRootSnapshot();
+	if (IsRootInvalid(RootSnapshot))
 	{
 		return Thespeon::Core::FModuleEntry();
 	}
 
 	// Get the "language_modules" object
 	const TSharedPtr<FJsonObject>* LangModulesObjPtr = nullptr;
-	if (!Root->TryGetObjectField(TEXT("language_modules"), LangModulesObjPtr) || !LangModulesObjPtr)
+	if (!RootSnapshot->TryGetObjectField(TEXT("language_modules"), LangModulesObjPtr) || !LangModulesObjPtr)
 	{
 		LINGO_LOG(
 		    EVerbosityLevel::Warning,
@@ -227,13 +251,14 @@ Thespeon::Core::FModuleEntry UManifestHandler::GetLanguageModuleEntry(const FStr
 
 bool UManifestHandler::HasLanguageModule(const FString& ModuleID) const
 {
-	if (IsRootInvalid())
+	const TSharedPtr<FJsonObject> RootSnapshot = GetRootSnapshot();
+	if (IsRootInvalid(RootSnapshot))
 	{
 		return false;
 	}
 
 	const TSharedPtr<FJsonObject>* LangModulesObjPtr = nullptr;
-	if (!Root->TryGetObjectField(TEXT("language_modules"), LangModulesObjPtr) || !LangModulesObjPtr)
+	if (!RootSnapshot->TryGetObjectField(TEXT("language_modules"), LangModulesObjPtr) || !LangModulesObjPtr)
 	{
 		return false;
 	}
@@ -266,13 +291,14 @@ FString UManifestHandler::FindLanguageModuleIDForISO(const FString& ISO639_2) co
 // Handles root validation and character_modules extraction; skips invalid module objects.
 void UManifestHandler::IterateCharacterModules(TFunctionRef<void(const FString&, const TSharedPtr<FJsonObject>&)> Callback) const
 {
-	if (IsRootInvalid())
+	const TSharedPtr<FJsonObject> RootSnapshot = GetRootSnapshot();
+	if (IsRootInvalid(RootSnapshot))
 	{
 		return;
 	}
 
 	TSharedPtr<FJsonObject> CharacterModules;
-	if (!TryGetCharacterModules(CharacterModules))
+	if (!TryGetCharacterModules(RootSnapshot, CharacterModules))
 	{
 		return;
 	}
@@ -481,13 +507,14 @@ TArray<FLanguageModuleInfo> UManifestHandler::GetAllLanguageModules() const
 {
 	TArray<FLanguageModuleInfo> Result;
 
-	if (!Root.IsValid())
+	const TSharedPtr<FJsonObject> RootSnapshot = GetRootSnapshot();
+	if (!RootSnapshot.IsValid())
 	{
 		return Result;
 	}
 
 	const TSharedPtr<FJsonObject>* LanguageModulesPtr = nullptr;
-	if (Root->TryGetObjectField(TEXT("language_modules"), LanguageModulesPtr) && LanguageModulesPtr)
+	if (RootSnapshot->TryGetObjectField(TEXT("language_modules"), LanguageModulesPtr) && LanguageModulesPtr)
 	{
 		const TSharedPtr<FJsonObject>& LanguageModules = *LanguageModulesPtr;
 
@@ -530,13 +557,14 @@ TArray<FLanguageModuleInfo> UManifestHandler::GetAllLanguageModules() const
 // "file_usage" map. Shared files must not be deleted when a single module is removed.
 bool UManifestHandler::IsFileShared(const FString& MD5) const
 {
-	if (IsRootInvalid())
+	const TSharedPtr<FJsonObject> RootSnapshot = GetRootSnapshot();
+	if (IsRootInvalid(RootSnapshot))
 	{
 		return false;
 	}
 
 	const TSharedPtr<FJsonObject>* FileUsagePtr = nullptr;
-	if (!Root->TryGetObjectField(TEXT("file_usage"), FileUsagePtr) || !FileUsagePtr)
+	if (!RootSnapshot->TryGetObjectField(TEXT("file_usage"), FileUsagePtr) || !FileUsagePtr)
 	{
 		return false;
 	}

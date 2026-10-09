@@ -29,10 +29,10 @@
 ---
 
 ## Overview
-This document details a step-by-step guide on how to install Lingotion Thespeon in your Unreal project, set up your first synthesis, and start generating character voices. This process covers:
-1. Install the Thespeon Plugin
+This guide walks you through installing Lingotion Thespeon in your Unreal project, setting up your first synthesis, and generating character voices. It covers:
+1. Install the Thespeon plugin
 2. Add the developer license key
-3. Import the downloaded _.lingotion_ files
+3. Import the downloaded _.lingotion_ file
 4. Run the _GUISample_ level to verify setup
 5. Integrate Thespeon into your own project (Blueprint or C++)
 
@@ -41,11 +41,11 @@ This document details a step-by-step guide on how to install Lingotion Thespeon 
 
 ## Install the Thespeon Unreal Plugin
 > [!IMPORTANT]
-> The Lingotion Thespeon Plugin only works in C++ projects. If your project is created as a Blueprint project, follow the instructions at [Unreal Engine C++ Required Setup](https://dev.epicgames.com/documentation/en-us/unreal-engine/unreal-engine-cpp-quick-start#1requiredsetup) before continuing.
-> 
+> The Lingotion Thespeon plugin only works in C++ projects. If your project was created as a Blueprint project, follow the instructions at [Unreal Engine C++ Required Setup](https://dev.epicgames.com/documentation/en-us/unreal-engine/unreal-engine-cpp-quick-start#1requiredsetup) before continuing.
+
 1. Clone the repository into the **Plugins** folder of your project, or download your desired release and extract it into the **Plugins** folder. If the folder does not exist, create it.
 
-2. Regenerate the Visual Studio Solution files using the Tools menu, and recompile your project.
+2. Regenerate your project files (Visual Studio on Windows, Xcode on macOS) and recompile your project.
 
 If the following popup occurs, press **Yes**:
 
@@ -63,15 +63,14 @@ Navigate to `Edit > Project Settings > Plugins > Lingotion Thespeon (Editor Tool
 ![Paste license](./data/paste-license.png)
 
 > [!IMPORTANT]
-> Lingotion Thespeon generates audio in 44100 Hz - please make sure that all platforms you target have their sample rate set to 44100 in the `Edit > Project Settings > Platforms > ... > Audio Mixer Sample Rate` setting. If you don't do this, the audio will sound pitched.
+> Lingotion Thespeon generates audio at 44100 Hz. Make sure that all platforms you target have their sample rate set to 44100 in the `Edit > Project Settings > Platforms > ... > Audio Mixer Sample Rate` setting. Otherwise the audio will sound pitched.
 
 ## Import the downloaded _.lingotion_ file
 Now that the plugin is installed, we can import the _.lingotion_ file from the Lingotion developer portal.
 
-Thespeon has its own information window that displays an overview of installed characters and languages, tools for importing and deleting modules from the project.
+Thespeon has its own information window that shows an overview of the installed characters and languages, and provides tools for importing and deleting modules.
 
 1. To find the _Lingotion Thespeon Info_ window, go to `Window > Lingotion Thespeon Info` from the top menu.
-
 
 ![Lingotion Thespeon Info Window](./data/thespeon-info.png)
 
@@ -82,12 +81,12 @@ Thespeon has its own information window that displays an overview of installed c
 Now everything is set up to start using Lingotion Thespeon to generate voices!
 
 ## Run the _GUISample_ level
-The quickest way to test Lingotion Thespeon is to try the GUISample Level included in the plugin. Navigate to `Content Browser > Plugins > Lingotion Thespeon > Samples > LingotionGUISample > L_LingotionGUISample` and open the level. 
+The quickest way to test Lingotion Thespeon is to try the GUISample level included in the plugin. Navigate to `Content Browser > Plugins > Lingotion Thespeon > Samples > LingotionGUISample > L_LingotionGUISample` and open the level.
 
-Press play, and you should see a simple UI where you can generate audio from an input text. 
+Press **Play**, and you should see a simple UI where you can generate audio from input text.
 
 > [!IMPORTANT]
-> The first time each character is synthesized from will have significantly slower performance due to buffer allocations. We recommend pre-loading characters with a mock-synthesis before regular use.
+> The first synthesis with each character is significantly slower because of buffer allocations. We recommend preloading characters with `PreloadCharacter` before regular use.
 
 ---
 
@@ -112,7 +111,7 @@ Loading character models takes time, so we preload them before synthesis. In the
 1. Drag from the **BeginPlay** event.
 2. Add a **PreloadCharacter** node from the `ThespeonComponent` reference.
 3. Set the parameters:
-   - **CharacterName**: The name of your imported character (visible in `Window > Lingotion Thespeon Info`), e.g., `"Denel"`.
+   - **CharacterName**: The name of your imported character (visible in `Window > Lingotion Thespeon Info`), e.g., `"Denel Honeyball"`.
    - **ModuleType**: The quality tier you downloaded. Options are `XS`, `S`, `M`, `L`, `XL`. Smaller sizes are faster, larger sizes have better audio fidelity.
 
 ### Bind the OnPreloadComplete event
@@ -132,15 +131,18 @@ In the **OnPreloadComplete** handler:
 1. Add a **Branch** node and connect `PreloadSuccess` to the condition.
 2. From the **True** output, add a **Synthesize** node from `ThespeonComponent`.
 3. Create segment(s) using **Make Lingotion Input Segment** nodes. Each segment has:
-   - **Text** (`FString`): The dialogue text to speak. E.g., `"Hello, I am your new companion!"`.
-   - **Emotion** (`EEmotion`, optional): The emotional tone. E.g., `Ecstasy`, `Joy`, `Fear`. Defaults to the global setting if not specified.
-   - **Language** (`FLingotionLanguage`, optional): The language for this segment. Defaults to the global setting if not specified.
+   - **Text** (`FString`): The dialogue text to speak, e.g. `"Hello, I am your new companion!"`.
+   - **Language** (`FLingotionLanguage`, optional): The language for this segment. Defaults to the input's **DefaultLanguage** if not specified.
+   - **StartEmotion** / **EndEmotion** (`TMap<EEmotion, float>`, optional): Emotion blends at the start and end of the segment. See [Blending emotions and shaping delivery](./the-thespeon-manual.md#blending-emotions-and-shaping-delivery).
+   - **StartSpeed** / **EndSpeed** and **StartLoudness** / **EndLoudness** (`float`, optional): Speed and loudness multipliers at the start and end of the segment. `1.0` is normal.
+
+   The node also shows an **Emotion** pin. It is a legacy field that currently has no effect on synthesis, so leave it as `None` and use **StartEmotion** / **EndEmotion** or the input's **DefaultEmotion** instead.
 4. Connect the segment(s) to a **Make Array** node to create the segments array.
 5. Create a **Make Lingotion Model Input** node and configure it:
    - **Segments**: Connect the output of the **Make Array** node.
    - **CharacterName**: Same character name used in `PreloadCharacter`.
    - **ModuleType**: Same module type used in `PreloadCharacter`.
-   - **DefaultEmotion** (optional): The fallback emotion for segments that don't specify one.
+   - **DefaultEmotion** (optional): The emotion for the whole line when no segment sets a **StartEmotion** or **EndEmotion**. The simplest way to give a line one emotion.
    - **DefaultLanguage** (optional): The fallback language for segments that don't specify one.
 6. Connect the **Lingotion Model Input** output to the **Input** pin on the **Synthesize** node.
 7. Optionally provide a **SessionId** (`FString`) to identify this synthesis session in delegate callbacks.
@@ -151,7 +153,7 @@ In the **OnPreloadComplete** handler:
 
 The plugin provides `UAudioStreamComponent`, a ready-to-use audio streaming component for progressive playback:
 
-1. Add a **AudioStreamComponent** to your Actor (via Add Component, search for `AudioStreamComponent`).
+1. Add an **AudioStreamComponent** to your Actor (via Add Component, search for `AudioStreamComponent`).
 2. In **BeginPlay**, call **Start** on the `AudioStreamComponent`.
 3. Bind the **OnAudioReceived** event on the `ThespeonComponent`.
 4. In the **OnAudioReceived** handler, call **SubmitAudioToStream** on the `AudioStreamComponent`, passing the received `SynthesisData` array.
@@ -159,7 +161,7 @@ The plugin provides `UAudioStreamComponent`, a ready-to-use audio streaming comp
 The audio data is delivered as arrays of floats (44100 Hz, mono) in chunks as it is generated. You may also use the raw data for recording (`FWavSaver`), visualization, or custom routing instead of `UAudioStreamComponent`.
 
 > [!TIP]
-> See the `ASimpleThespeonActor` C++ class or the GUISample Level Blueprint for working examples of audio playback setup.
+> See the `ASimpleThespeonActor` C++ class or the MinimalCharacterSample Level Blueprint for working examples of audio playback setup.
 
 ### Reference Blueprint
 
@@ -256,7 +258,7 @@ void AMySpeakingActor::BeginPlay()
     ThespeonComponent->OnPreloadComplete.AddDynamic(this, &AMySpeakingActor::OnPreloadDone);
 
     // Preload the character (non-blocking)
-    ThespeonComponent->PreloadCharacter(TEXT("Denel"), EThespeonModuleType::S);
+    ThespeonComponent->PreloadCharacter(TEXT("Denel Honeyball"), EThespeonModuleType::S);
 }
 
 void AMySpeakingActor::OnAudioData(FString SessionID, const TArray<float>& SynthData)
@@ -294,7 +296,7 @@ void AMySpeakingActor::OnPreloadDone(bool bPreloadSuccess, FString CharacterName
 |----------|-------------|------------|
 | `Synthesize` | Starts audio generation. Non-blocking. | `Input` (`FLingotionModelInput`): The speech input. `SessionId` (`FString`, optional): Identifier for callbacks. `InferenceConfig` (`FInferenceConfig`, optional): Backend, buffer, priority config. |
 | `PreloadCharacter` | Loads character models into memory. Non-blocking. | `CharacterName` (`FString`): Character name from imported modules. `ModuleType` (`EThespeonModuleType`): Quality tier (XS/S/M/L/XL). `InferenceConfig` (`FInferenceConfig`, optional). |
-| `PreloadCharacterGroup` | Preloads multiple characters atomically. | `Characters` (`TArray<FPreloadEntry>`): List of character/module/config entries. `PreloadGroupId` (`FString`): Group identifier. |
+| `PreloadCharacterGroup` | Preloads several characters as one group and fires `OnPreloadGroupComplete` when all have finished. | `Characters` (`TArray<FPreloadEntry>`): List of character/module/config entries. `PreloadGroupId` (`FString`): Group identifier. |
 | `TryUnloadCharacter` | Frees memory for a loaded character. | `CharacterName` (`FString`), `ModuleType` (`EThespeonModuleType`), `BackendType` (`EBackendType`, optional). Returns `bool`. |
 | `CancelSynthesis` | Stops the current synthesis session. | None. |
 | `IsSynthesizing` | Checks if synthesis is in progress. | None. Returns `bool`. |
@@ -305,17 +307,17 @@ void AMySpeakingActor::OnPreloadDone(bool bPreloadSuccess, FString CharacterName
 |----------|---------------|------------|
 | `OnPreloadComplete` | Character finished loading | `PreloadSuccess` (bool), `CharacterName` (FString), `ModuleType` (EThespeonModuleType), `BackendType` (EBackendType) |
 | `OnPreloadGroupComplete` | All characters in a group finished loading | `PreloadGroupId` (FString), `bAllSucceeded` (bool) |
-| `OnAudioReceived` | Audio chunk is available (if bound, replaces auto-playback) | `SessionID` (FString), `SynthesisData` (TArray\<float\>) |
+| `OnAudioReceived` | Audio chunk is available | `SessionID` (FString), `SynthesisData` (TArray\<float\>) |
 | `OnAudioSampleRequestReceived` | Audio sample indices for trigger markers are ready | `SessionID` (FString), `TriggerAudioSamples` (TArray\<int64\>) |
 | `OnSynthesisComplete` | Synthesis finished successfully | `SessionID` (FString) |
-| `OnSynthesisFailed` | Synthesis failed due to an error | `SessionID` (FString) |
+| `OnSynthesisFailed` | Synthesis failed, or the request was rejected before it started | `SessionID` (FString) |
 
 ### Key types
 
 | Type | Purpose | Key fields |
 |------|---------|------------|
 | [`FLingotionModelInput`](./API/FLingotionModelInput.md) | Full synthesis input | `CharacterName`, `ModuleType`, `Segments` (array), `DefaultEmotion`, `DefaultLanguage` |
-| [`FLingotionInputSegment`](./API/FLingotionInputSegment.md) | One segment of dialogue | `Text`, `Emotion` (EEmotion), `Language` (FLingotionLanguage), `bIsCustomPronounced` |
+| [`FLingotionInputSegment`](./API/FLingotionInputSegment.md) | One segment of dialogue | `Text`, `StartEmotion` / `EndEmotion` (emotion blends), `Language` (FLingotionLanguage), `bIsCustomPronounced`, `StartSpeed` / `EndSpeed`, `StartLoudness` / `EndLoudness` |
 | [`FInferenceConfig`](./API/FInferenceConfig.md) | Session configuration | `BackendType` (CPU/GPU), `BufferSeconds`, `ModuleType`, `FallbackEmotion`, `FallbackLanguage`, `ThreadPriority` |
 | [`EEmotion`](./API/EEmotion.md) | Emotional tone for a segment | 33 emotions: Joy, Sadness, Anger, Fear, Surprise, Trust, etc. |
 | [`FLingotionLanguage`](./API/FLingotionLanguage.md) | Language and dialect | `ISO639_2` (e.g. "eng"), `ISO3166_1` (e.g. "US"), and other ISO/Glotto codes |
@@ -327,11 +329,6 @@ For complete API documentation, see the [API Reference](./API/) directory.
 
 ## Next steps
 
-For an in-depth explanation of every feature -- character control, delegates, control characters, optimization, and more -- read **[The Thespeon Manual](./the-thespeon-manual.md)**.
+For an in-depth explanation of every feature (character control, delegates, control characters, optimization and more), read **[The Thespeon Manual](./the-thespeon-manual.md)**.
 
-The plugin also ships with several example scenes and code samples under `Content Browser > Plugins > Lingotion Thespeon > Samples`. These samples are the primary implementation reference:
-
-- **LingotionGUISample** -- Interactive UI example demonstrating the `UThespeonComponent`, including character preloading.
-- **MinimalCharacterSample** -- Blueprint-based guide on basic use of Thespeon, found in the Level Blueprint.
-- **MinimalActorExample** -- C++ Actor-based guide on basic use of Thespeon. Under Plugins > Lingotion Thespeon C++ Classes you will find the ready-made actor class SimpleThespeonActor which can be dropped into a level.
-- **AngelDevilDemoActor** -- Advanced C++ Actor demonstrating multi-character concurrent synthesis with different emotions. Drop it into any level from Plugins > Lingotion Thespeon C++ Classes to try it out.
+The plugin also ships with several sample levels and actors under `Content Browser > Plugins > Lingotion Thespeon > Samples`. These samples are the primary implementation reference. See **[Plugin Samples](./samples.md)** for what each one shows and how to run it.

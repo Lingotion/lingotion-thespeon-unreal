@@ -31,11 +31,22 @@ class CharacterModule : public Thespeon::Core::Module
 
 	CharacterModule(const Thespeon::Core::FModuleEntry& ModuleInfo);
 
+	/** @brief Returns the module type identifier ("character") without needing an instance.
+	 *
+	 *  The static counterpart to GetModuleType(), used by UModuleManager::GetModule<T> to verify a
+	 *  stored module really is a T before downcasting it.
+	 *
+	 *  @return The string "character". */
+	static FString StaticModuleType()
+	{
+		return TEXT("character");
+	}
+
 	/** @brief Returns the module type identifier ("character").
 	 *  @return The string "character". */
 	FString GetModuleType() const override
 	{
-		return TEXT("character");
+		return StaticModuleType();
 	}
 
 	/**

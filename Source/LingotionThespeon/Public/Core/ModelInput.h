@@ -14,11 +14,12 @@
 UENUM(BlueprintType)
 enum class EThespeonModuleType : uint8
 {
-	/** No module type selected. */
+	/** No module type selected. Synthesize uses the InferenceConfig's ModuleType (or the first imported one) instead; preload and unload calls fail.
+	 */
 	None UMETA(DisplayName = "None"),
 	/** Ultra-high quality. Best fidelity, highest resource usage. */
 	XL UMETA(DisplayName = "XL"),
-	/** High quality. */
+	/** High quality. High fidelity, high resource usage. */
 	L UMETA(DisplayName = "L"),
 	/** Medium quality. Balanced fidelity and performance. */
 	M UMETA(DisplayName = "M"),
@@ -120,19 +121,25 @@ struct FLingotionInputSegment
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (MultiLine = true), Category = "Lingotion Thespeon")
 	FString Text;
 
-	/** Legacy single emotion used by the current inference path. The Advanced GUI edits StartEmotion and EndEmotion instead. */
+	/** Legacy single emotion. Not read by inference: set StartEmotion and EndEmotion instead. The constructor that takes an EEmotion copies it into
+	 * both. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lingotion Thespeon")
 	EEmotion Emotion = EEmotion::None;
 
-	/** The emotion to apply to the start of this segment. TMap keys are emotions, values are their intensities (Sums to 1) */
+	/** The emotion blend at the start of this segment. Keys are emotions, values are their intensities. Weights are clamped to [0, 1], None keys are
+	 * removed, and the rest is normalized to sum to 1. The default {None: 1} means unset: the value is interpolated from neighbouring segments, or
+	 * DefaultEmotion is used if no segment sets one. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lingotion Thespeon")
 	TMap<EEmotion, float> StartEmotion;
 
-	/** The emotion to apply to the end of this segment. TMap keys are emotions, values are their intensities (Sums to 1) */
+	/** The emotion blend at the end of this segment. Keys are emotions, values are their intensities. Weights are clamped to [0, 1], None keys are
+	 * removed, and the rest is normalized to sum to 1. The default {None: 1} means unset: the value is interpolated from neighbouring segments, or
+	 * DefaultEmotion is used if no segment sets one. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lingotion Thespeon")
 	TMap<EEmotion, float> EndEmotion;
 
-	/** The language/dialect of this segment. Undefined uses the default language from the parent FLingotionModelInput. */
+	/** The language/dialect of this segment. If undefined, or not spoken by the character, the parent FLingotionModelInput's DefaultLanguage is used.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lingotion Thespeon")
 	FLingotionLanguage Language;
 
@@ -140,12 +147,18 @@ struct FLingotionInputSegment
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lingotion Thespeon")
 	bool bIsCustomPronounced = false;
 
+	/** Speech-rate multiplier at the start of this segment (1.0 = normal). Interpolated linearly to EndSpeed within the segment. Not range-checked.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lingotion Thespeon")
 	float StartSpeed = 1.0f;
+	/** Speech-rate multiplier at the end of this segment (1.0 = normal). Not range-checked. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lingotion Thespeon")
 	float EndSpeed = 1.0f;
+	/** Loudness multiplier at the start of this segment (1.0 = normal). Interpolated linearly to EndLoudness within the segment. Not range-checked.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lingotion Thespeon")
 	float StartLoudness = 1.0f;
+	/** Loudness multiplier at the end of this segment (1.0 = normal). Not range-checked. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lingotion Thespeon")
 	float EndLoudness = 1.0f;
 
@@ -178,7 +191,7 @@ struct FLingotionInputSegment
 	{
 	}
 
-	/** Expanded legacy constructor. Retains old behavior.*/
+	/** Legacy constructor: sets Emotion and uses it as a full-weight StartEmotion and EndEmotion. */
 	FLingotionInputSegment(
 	    const FString& InText,
 	    EEmotion InEmotion,
@@ -204,7 +217,7 @@ struct FLingotionInputSegment
 	}
 
 	/**
-	 * @brief Attempts to parse an input segment from a JSON object.
+	 * @brief Attempts to parse an input segment from a JSON object. Only "text" is read; other fields keep their defaults.
 	 *
 	 * @param Json The JSON object to parse.
 	 * @param OutSegment Receives the parsed segment on success.
@@ -229,15 +242,16 @@ struct FLingotionModelInput
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lingotion Thespeon")
 	TArray<FLingotionInputSegment> Segments;
 
-	/** Which module type of the current Thespeon character to use for synthesis. Must match an imported character module. */
+	/** Which module type of the character to use for synthesis. If None or not imported, InferenceConfig.ModuleType or the first imported type is
+	 * used, with a warning. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lingotion Thespeon")
 	EThespeonModuleType ModuleType;
 
-	/** Name of the Thespeon character to use for synthesis. Must match an imported character module. */
+	/** Name of the Thespeon character to use for synthesis. If empty or not imported, the first imported character is used, with a warning. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lingotion Thespeon")
 	FString CharacterName;
 
-	/** Default emotion applied to segments that do not specify their own emotion. */
+	/** Emotion used for the whole line when no segment sets an emotion. Otherwise segments without one interpolate from their neighbours. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lingotion Thespeon")
 	EEmotion DefaultEmotion;
 
@@ -245,12 +259,9 @@ struct FLingotionModelInput
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lingotion Thespeon")
 	FLingotionLanguage DefaultLanguage;
 
-	FLingotionModelInput()
-	    : ModuleType(EThespeonModuleType::None) // Set appropriate default
-	    , DefaultEmotion(EEmotion::None)
-	{
-	}
+	FLingotionModelInput() : ModuleType(EThespeonModuleType::None), DefaultEmotion(EEmotion::None) {}
 
+	/** Parses an enum value from its name string. Returns false if the name is unknown. */
 	template <typename TEnum> static bool ParseInputEnum(const FString& Str, TEnum& OutEnum)
 	{
 		UEnum* Enum = StaticEnum<TEnum>();
@@ -273,22 +284,42 @@ struct FLingotionModelInput
 	 * @brief Validates that the selected character module (character name + module type) has been imported into the project and sets a fallback
 	 * character module if not.
 	 * @param FallbackModuleType The module type to fall back to if the current one is invalid but the character exists.
+	 * An unknown or empty CharacterName is replaced by the first imported character.
 	 * @return true if the character module is valid or a fallback was set, false if no valid character module could be found.
 	 */
 	bool ValidateCharacterModule(EThespeonModuleType FallbackModuleType);
 	/**
 	 * @brief Validates that an entire input instance contains valid selections for currently loaded character modules.
-	 * If any part is invalid, it will attempt to set fallbacks based on what is available.
+	 * If any part is invalid, it will attempt to set fallbacks based on what is available. Then populates every
+	 * segment's emotion, speed and loudness keypoints.
+	 *
+	 * Segment text is not changed: text preprocessing (normalization and numbers) happens at synthesis, with the
+	 * rules of each segment's language pack.
+	 *
+	 * @param FallbackModuleType Module type to fall back to if the selected one is unavailable.
+	 * @param FallbackLanguage Replaces an undefined DefaultLanguage on the input.
+	 * @param FallbackEmotion Replaces a None DefaultEmotion on the input.
+	 * @return true if the input is valid or was corrected with fallbacks; false if the character module is not loaded
+	 *         or a segment's text is empty.
+	 */
+	bool ValidateAndPopulate(EThespeonModuleType FallbackModuleType, FLingotionLanguage FallbackLanguage, EEmotion FallbackEmotion);
+
+	/**
+	 * @brief Validates the input and sets fallbacks as ValidateAndPopulate does, without populating keypoints.
+	 *
+	 * Synthesis uses this: it populates the keypoints after text preprocessing, which can split segments and change
+	 * their length.
 	 *
 	 * @param FallbackModuleType Module type to fall back to if the selected one is unavailable.
 	 * @param FallbackLanguage Language to fall back to for segments with undefined languages.
 	 * @param FallbackEmotion Emotion to fall back to for segments with None emotion.
 	 * @return true if the input is valid or was successfully corrected with fallbacks.
 	 */
-	bool ValidateAndPopulate(EThespeonModuleType FallbackModuleType, FLingotionLanguage FallbackLanguage, EEmotion FallbackEmotion);
+	bool Validate(EThespeonModuleType FallbackModuleType, FLingotionLanguage FallbackLanguage, EEmotion FallbackEmotion);
 
 	/**
-	 * @brief Attempts to parse a complete model input from a JSON object.
+	 * @brief Attempts to parse a complete model input from a JSON object. CharacterName is read from "actorName",
+	 * and segments only read "text". On failure OutModelInput may be partly filled.
 	 *
 	 * @param Json The JSON object containing model input fields.
 	 * @param OutModelInput Receives the parsed model input on success.
@@ -314,13 +345,13 @@ namespace Thespeon
 namespace ControlCharacters
 {
 /**
- * This character tells Thespeon to insert a short pause of silence in the generated dialogue.
+ * This character tells Thespeon to insert a short silence in the generated dialogue.
  */
 constexpr TCHAR Pause = TEXT('⏸');
 /**
- * Thespeon is able to find the audio sample which best corresponds to a position in the input text. This character marks one such position to request
- * its corresponding audio sample. The FOnAudioSampleRequestReceived delegate will deliver all such sample indices in left-to-right order.
- * It is guaranteed to broadcast before the first FOnAudioReceived for the same synthesis session.
+ * Thespeon can find the audio sample that best corresponds to a position in the input text. Place this character in the text to request
+ * the audio sample index at that position. The OnAudioSampleRequestReceived delegate delivers all such sample indices in left-to-right order.
+ * It is guaranteed to broadcast before the first OnAudioReceived for the same synthesis session.
  */
 constexpr TCHAR AudioSampleRequest = TEXT('◎');
 } // namespace ControlCharacters

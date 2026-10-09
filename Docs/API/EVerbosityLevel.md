@@ -2,6 +2,10 @@
 
 *Defined in: `LingotionThespeon/Public/Core/RuntimeThespeonSettings.h`*
 
+Verbosity level for Lingotion Thespeon logging. Each level also includes all less detailed levels (e.g. Info includes Warning and Error).
+
+## Values
+
 ### `None`
 Logging disabled.
 
@@ -16,5 +20,3 @@ Errors, warnings, and informational messages are logged.
 
 ### `Debug`
 All messages including debug details are logged.
-
-Verbosity level for Lingotion Thespeon logging. Each level includes all levels above it.

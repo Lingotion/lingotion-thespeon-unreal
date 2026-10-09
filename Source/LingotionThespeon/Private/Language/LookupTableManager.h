@@ -51,6 +51,14 @@ class ULookupTableManager : public UGameInstanceSubsystem
 	 */
 	TSharedPtr<Thespeon::Language::RuntimeLookupTable, ESPMode::ThreadSafe> GetLookupTable(const FString& MD5);
 
+	/**
+	 * Checks whether a language module's lookup table is registered. Takes the read lock, so it is
+	 * safe to call while a preload thread is registering.
+	 * @param Module The language module whose lookup table to check.
+	 * @return True if the module's lookup table is registered.
+	 */
+	bool IsTableRegistered(Thespeon::Language::LanguageModule* Module) const;
+
 	/** Clears all registered lookup tables for garbage collection. */
 	void DisposeAndClear();
 
