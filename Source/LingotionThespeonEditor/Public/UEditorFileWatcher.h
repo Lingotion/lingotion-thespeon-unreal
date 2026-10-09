@@ -15,7 +15,11 @@ class UEditorFileWatcher : public UEditorSubsystem
   public:
 	void Initialize(FSubsystemCollectionBase& Collection) override;
 	void Deinitialize() override;
-	void UpdateMappingsInfo();
+	/**
+	 * Rebuilds the manifest from the module configs in RuntimeData.
+	 * @param bForce - Rebuild even if the set of config filenames is unchanged, e.g. after a config was overwritten by a re-import
+	 */
+	void UpdateMappingsInfo(bool bForce = false);
 	static UEditorFileWatcher* Get()
 	{
 		return GEditor ? GEditor->GetEditorSubsystem<UEditorFileWatcher>() : nullptr;

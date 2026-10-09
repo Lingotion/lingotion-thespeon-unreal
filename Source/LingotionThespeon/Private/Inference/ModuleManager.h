@@ -47,9 +47,9 @@ class UModuleManager : public UGameInstanceSubsystem
 
 		{
 			FReadScopeLock ReadLock(ModulesLock);
-			if (Modules.Contains(ModuleEntry.ModuleID))
+			if (auto* Existing = Modules.Find(ModuleEntry.ModuleID))
 			{
-				return StaticCastSharedPtr<T>(Modules[ModuleEntry.ModuleID]);
+				return CastModuleChecked<T>(*Existing);
 			}
 		}
 		// Not found — need to create
@@ -63,10 +63,13 @@ class UModuleManager : public UGameInstanceSubsystem
 			FWriteScopeLock WriteLock(ModulesLock);
 			// Double-check after acquiring write lock
 			AddModuleIfAbsent_Locked<T>(ModuleEntry);
-			return StaticCastSharedPtr<T>(Modules[ModuleEntry.ModuleID]);
+			// Still checked: another thread may have won the race and registered this ID as a
+			// different module type, in which case AddModuleIfAbsent_Locked kept theirs.
+			return CastModuleChecked<T>(Modules[ModuleEntry.ModuleID]);
 		}
 	}
-	// Resource overlap detection - now uses safe dynamic_cast instead of enum + static_cast
+	// Resource overlap detection - compares GetModuleType() discriminators instead of an enum, since
+	// Module is not a UObject (no Cast<T>) and RTTI is disabled (no dynamic_cast).
 	TSet<FString> GetWorkloadIDsToRemove(
 	    Thespeon::Core::Module* Module,
 	    EBackendType BackendType
@@ -79,6 +82,44 @@ class UModuleManager : public UGameInstanceSubsystem
 	TSet<FString> GetNonOverlappingModelLangModules(Thespeon::Character::CharacterModule* Module);
 
   private:
+	/**
+	 * Downcasts a stored module to T only if it really is a T.
+	 *
+	 * Modules are stored type-erased as TSharedPtr<Module>, and StaticCastSharedPtr performs no
+	 * check of its own — two call sites requesting the same ModuleID with different T would
+	 * otherwise be silent undefined behaviour. Compares the module's GetModuleType() discriminator
+	 * against T::StaticModuleType(), which is the only type identity available here: Module is a
+	 * plain C++ class rather than a UObject, so Cast<T> does not apply, and RTTI is disabled in
+	 * LingotionThespeon.Build.cs, so dynamic_cast is unavailable.
+	 *
+	 * Caller must hold either lock, so the shared pointer stays alive for the duration.
+	 *
+	 * @return The module as T, or nullptr if it is null or of a different type.
+	 */
+	template <typename T>
+	static TSharedPtr<T, ESPMode::ThreadSafe> CastModuleChecked(const TSharedPtr<Thespeon::Core::Module, ESPMode::ThreadSafe>& StoredModule)
+	{
+		static_assert(std::is_base_of_v<Thespeon::Core::Module, T>, "T must derive from Module");
+		if (!StoredModule.IsValid())
+		{
+			return nullptr;
+		}
+		const FString StoredType = StoredModule->GetModuleType();
+		const FString RequestedType = T::StaticModuleType();
+		if (StoredType != RequestedType)
+		{
+			LINGO_LOG(
+			    EVerbosityLevel::Error,
+			    TEXT("Module '%s' is registered as type '%s' but was requested as type '%s'. Refusing to cast."),
+			    *StoredModule->ModuleID,
+			    *StoredType,
+			    *RequestedType
+			);
+			return nullptr;
+		}
+		return StaticCastSharedPtr<T>(StoredModule);
+	}
+
 	/** Creates a module if not already present. Caller must hold the write lock. */
 	template <typename T> void AddModuleIfAbsent_Locked(const Thespeon::Core::FModuleEntry& ModuleEntry)
 	{

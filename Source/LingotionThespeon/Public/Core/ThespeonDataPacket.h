@@ -60,10 +60,11 @@ struct FThespeonDataPacket
 	/** The type of callback this packet represents (audio, error, trigger, etc.). */
 	SynthCallbackType CallbackType;
 
-	/** The data payload, either audio samples (float array) or trigger indices (int64 array). */
+	/** The data payload: audio samples (float array) for CB_AUDIO, trigger indices (int64 array) for CB_TRIGGERSAMPLE, or an empty float array for
+	 * CB_ERROR. */
 	FPacketPayload Payload;
 
-	/** Optional metadata key-value pairs attached to this packet. */
+	/** Optional metadata. Known keys: "is_final" (bool, audio packets) and "was_cancelled" (bool, CB_ERROR packets that signal cancellation). */
 	FMetadataMap Metadata;
 
 	/** Default constructor is deleted; a callback type must always be specified. */

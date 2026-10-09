@@ -12,6 +12,8 @@
 #include "InferenceWorkloadManager.h"
 #include "PreloadSession.h"
 #include "Language/TextPreprocessor.h"
+#include "Language/TextPreprocessingRules.h"
+#include "Language/UnicodeTables.h"
 #include <type_traits>
 #include "Core/meta_graph.pb.h"
 #include "MetaGraphRunner.h"
@@ -255,7 +257,8 @@ bool Thespeon::Inference::ThespeonInference::PhonemizeBatch(
 }
 
 bool Thespeon::Inference::ThespeonInference::PhonemizeSegment(
-    FLingotionInputSegment Segment,
+    const FLingotionInputSegment& Segment,
+    const Thespeon::Language::FWordSplitter& Words,
     Thespeon::Character::CharacterModule* CharacterModule,
     Thespeon::Language::RuntimeLookupTable* LookupTable,
     TArray<int64>& OutSegmentTokens,
@@ -263,39 +266,47 @@ bool Thespeon::Inference::ThespeonInference::PhonemizeSegment(
     int& TextLengthSoFar
 )
 {
-	FString CleanedText = Segment.Text;
-	int32 TextPos = 0;
-	int32 OutIndexPos = 0;
-	while (TextPos < CleanedText.Len())
+	// Audio sample request markers are not word characters, so they are taken out before the words are found
+	// (a marker inside a word would split it), and each is placed by where it was in the text.
+	FString Text;
+	Text.Reserve(Segment.Text.Len());
+	TArray<int32> MarkerPositions;
+	for (const TCHAR C : Segment.Text)
 	{
-		// Check if we're at the start of a word
-		bool bIsWordChar = FChar::IsAlpha(CleanedText[TextPos]) || CleanedText[TextPos] == TEXT('\'');
-
-		if (bIsWordChar)
+		if (C == Thespeon::ControlCharacters::AudioSampleRequest)
 		{
-			// Extract the word
-			int32 WordStart = TextPos;
-			int LocalWordIndex = 0;
-			int MarkerFoundAt = -1;
-			int CurrentMarkerIndex = 0;
-			while (TextPos < CleanedText.Len() && (FChar::IsAlpha(CleanedText[TextPos]) || CleanedText[TextPos] == TEXT('\'') ||
-			                                       CleanedText[TextPos] == Thespeon::ControlCharacters::AudioSampleRequest))
-			{
-				if (CleanedText[TextPos] == Thespeon::ControlCharacters::AudioSampleRequest) // record and remove
-				{
-					CurrentMarkerIndex = OutIndexPos + TextLengthSoFar - LocalWordIndex;
-					MarkerFoundAt = LocalWordIndex;
-					CleanedText.RemoveAt(TextPos);
-				}
-				else
-				{
-					TextPos++;
-					OutIndexPos++;
-				}
-				LocalWordIndex++;
-			}
+			MarkerPositions.Add(Text.Len());
+		}
+		else
+		{
+			Text.AppendChar(C);
+		}
+	}
+	const TArray<Thespeon::Language::FWord> SegmentWords =
+	    Words.Split(Text, [LookupTable](const FString& Word) { return LookupTable->ContainsKey(Word); });
 
-			FString Word = CleanedText.Mid(WordStart, TextPos - WordStart);
+	// The segment with its words replaced by their phonemes, for the debug log.
+	FString Phonemized;
+	// Marker positions are counted in encoder tokens, the unit of target_phoneme_indices.
+	int32 SegmentTokenCount = 0;
+	int32 MarkerIndex = 0;
+	auto AddMarkersUpTo = [&](int32 Position)
+	{
+		while (MarkerIndex < MarkerPositions.Num() && MarkerPositions[MarkerIndex] <= Position)
+		{
+			GlobalIndices.Add(TextLengthSoFar + SegmentTokenCount);
+			++MarkerIndex;
+		}
+	};
+
+	int32 Position = 0;
+	int32 WordIndex = 0;
+	while (Position < Text.Len())
+	{
+		if (WordIndex < SegmentWords.Num() && SegmentWords[WordIndex].Index == Position)
+		{
+			const FString& Word = SegmentWords[WordIndex].Text;
+			AddMarkersUpTo(Position);
 
 			// Get phonemes from lookup table (should always exist now)
 			FString Phonemes;
@@ -304,63 +315,60 @@ bool Thespeon::Inference::ThespeonInference::PhonemizeSegment(
 				LINGO_LOG(EVerbosityLevel::Error, TEXT("Word '%s' not found in lookup after processing!"), *Word);
 				return false;
 			}
-			float WordLengtheningFactor = static_cast<float>(Phonemes.Len()) / static_cast<float>(Word.Len());
-			if (MarkerFoundAt != -1)
-			{
-				GlobalIndices.Add(CurrentMarkerIndex + FMath::RoundToInt(MarkerFoundAt * WordLengtheningFactor));
-			}
 			// Encode phonemes to encoder IDs via CharacterModule
 			TArray<int64> EncoderTokens = CharacterModule->EncodePhonemes(Phonemes);
-			OutSegmentTokens.Append(EncoderTokens);
+
+			// A marker inside the word goes the same fraction of the way into its phonemes.
+			const int32 WordEnd = Position + Word.Len();
+			while (MarkerIndex < MarkerPositions.Num() && MarkerPositions[MarkerIndex] <= WordEnd)
+			{
+				const float Fraction = static_cast<float>(MarkerPositions[MarkerIndex] - Position) / static_cast<float>(Word.Len());
+				GlobalIndices.Add(TextLengthSoFar + SegmentTokenCount + FMath::RoundToInt(Fraction * EncoderTokens.Num()));
+				++MarkerIndex;
+			}
+
 			LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Word '%s' -> phonemes '%s' (%d tokens)"), *Word, *Phonemes, EncoderTokens.Num());
-			OutIndexPos += Phonemes.Len() - Word.Len(); // adjust for phoneme length difference
+			SegmentTokenCount += EncoderTokens.Num();
+			OutSegmentTokens.Append(MoveTemp(EncoderTokens));
+			Phonemized += Phonemes;
+			Position = WordEnd;
+			++WordIndex;
 		}
 		else
 		{
-			if (CleanedText[TextPos] == Thespeon::ControlCharacters::AudioSampleRequest)
+			AddMarkersUpTo(Position);
+			// It's a delimiter (space, punctuation, etc.) - encode directly, a whole code point at a time
+			const int32 Length = Thespeon::Language::CodePoints::LengthAt(Text, Position);
+			const FString Delimiter = Text.Mid(Position, Length);
+			Phonemized += Delimiter;
+			TArray<int64> DelimiterTokens = CharacterModule->EncodePhonemes(Delimiter);
+			if (DelimiterTokens.Num() > 0)
 			{
-				GlobalIndices.Add(OutIndexPos + TextLengthSoFar);
-				CleanedText.RemoveAt(TextPos);
+				LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Delimiter '%s' -> %d tokens"), *Delimiter, DelimiterTokens.Num());
+				SegmentTokenCount += DelimiterTokens.Num();
+				OutSegmentTokens.Append(MoveTemp(DelimiterTokens));
 			}
-			else
-			{
-				// It's a delimiter (space, punctuation, etc.) - encode directly
-				FString Delimiter = FString::Chr(CleanedText[TextPos]);
-				TArray<int64> DelimiterTokens = CharacterModule->EncodePhonemes(Delimiter);
-
-				if (DelimiterTokens.Num() > 0)
-				{
-					OutSegmentTokens.Append(DelimiterTokens);
-					LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Delimiter '%s' -> %d tokens"), *Delimiter, DelimiterTokens.Num());
-				}
-				TextPos++;
-				OutIndexPos++;
-			}
+			Position += Length;
 		}
 	}
-	TextLengthSoFar += OutIndexPos;
+	AddMarkersUpTo(MAX_int32);
+	TextLengthSoFar += SegmentTokenCount;
+	LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Phonemized segment: %s"), *Phonemized);
 	return true;
 }
 
 TArray<FString> Thespeon::Inference::ThespeonInference::GetUnknownWords(
-    const FString& Text, Thespeon::Language::LanguageModule* LangModule, Thespeon::Language::RuntimeLookupTable* LookupTable
+    const FString& Text, const Thespeon::Language::FWordSplitter& Words, Thespeon::Language::RuntimeLookupTable* LookupTable
 )
 {
 	TArray<FString> OutUnknownWords;
-	TArray<FString> AllWords = FTextPreprocessor::ExtractWords(Text);
-	if (AllWords.Num() == 0)
+	for (const Thespeon::Language::FWord& Word :
+	     Words.Split(Text, [LookupTable](const FString& Candidate) { return LookupTable->ContainsKey(Candidate); }))
 	{
-		LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("No words extracted from text"));
-		return TArray<FString>();
-	}
-
-	for (const FString& Word : AllWords)
-	{
-		FString Phonemes;
-		if (!LookupTable->TryGetValue(Word, Phonemes))
+		if (!LookupTable->ContainsKey(Word.Text))
 		{
-			OutUnknownWords.Add(Word);
-			LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Word '%s' NOT in lookup - will phonemize"), *Word);
+			OutUnknownWords.AddUnique(Word.Text);
+			LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Word '%s' NOT in lookup - will phonemize"), *Word.Text);
 		}
 	}
 	return OutUnknownWords;
@@ -406,7 +414,8 @@ bool Thespeon::Inference::ThespeonInference::ExecuteInference()
 		);
 		return false;
 	}
-	if (!Input.ValidateAndPopulate(InputConfig.ModuleType, InputConfig.FallbackLanguage, InputConfig.FallbackEmotion))
+	// Keypoints are populated after text preprocessing, below, since it can split segments and change their length.
+	if (!Input.Validate(InputConfig.ModuleType, InputConfig.FallbackLanguage, InputConfig.FallbackEmotion))
 	{
 		LINGO_LOG(EVerbosityLevel::Error, TEXT("Input validation failed. See earlier logs for details."));
 		return false;
@@ -456,6 +465,71 @@ bool Thespeon::Inference::ThespeonInference::ExecuteInference()
 	    *(CharacterModule->JSONPath),
 	    *(CharacterModule->Version.ToString())
 	);
+
+	// Language modules and lookup tables, resolved once per language for this session.
+	TMap<FString, TSharedPtr<Thespeon::Language::LanguageModule, ESPMode::ThreadSafe>> LanguageModules;
+	TMap<FString, TSharedPtr<Thespeon::Language::RuntimeLookupTable, ESPMode::ThreadSafe>> LookupTables;
+	auto ResolveLanguageModule = [&](const FString& TargetISO639_2) -> Thespeon::Language::LanguageModule*
+	{
+		if (const TSharedPtr<Thespeon::Language::LanguageModule, ESPMode::ThreadSafe>* Cached = LanguageModules.Find(TargetISO639_2))
+		{
+			return Cached->Get();
+		}
+		LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("LanguageModule for ISO %s not in cache, loading..."), *TargetISO639_2);
+		FString* LangModuleID = CharacterModule->LanguageModuleIDs.Find(TargetISO639_2);
+		if (!LangModuleID)
+		{
+			LINGO_LOG(EVerbosityLevel::Error, TEXT("Character module has no language: %s"), *TargetISO639_2);
+			return nullptr;
+		}
+		Thespeon::Core::FModuleEntry LangEntry = ManifestHandler->GetLanguageModuleEntry(*LangModuleID);
+		TSharedPtr<Thespeon::Language::LanguageModule, ESPMode::ThreadSafe> LangModulePtr =
+		    ModuleManager->GetModule<Thespeon::Language::LanguageModule>(LangEntry);
+		if (!LangModulePtr)
+		{
+			LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to get LanguageModule"));
+			return nullptr;
+		}
+		LINGO_LOG_FUNC(
+		    EVerbosityLevel::Debug,
+		    TEXT("Got LanguageModule: %s, %s, %s"),
+		    *(LangModulePtr->ModuleID),
+		    *(LangModulePtr->JSONPath),
+		    *(LangModulePtr->Version.ToString())
+		);
+		return LanguageModules.Add(TargetISO639_2, LangModulePtr).Get();
+	};
+
+	// Text preprocessing, by the rules of each segment's language pack. There are no built-in fallback rules.
+	const bool bPreprocessed = FTextPreprocessor::PreprocessSegments(
+	    Input.Segments,
+	    [&ResolveLanguageModule](const FLingotionLanguage& Language) -> const Thespeon::Language::FTextPreprocessingRules*
+	    {
+		    Thespeon::Language::LanguageModule* LangModule = ResolveLanguageModule(Language.ISO639_2);
+		    if (!LangModule)
+		    {
+			    return nullptr;
+		    }
+		    const Thespeon::Language::FTextPreprocessingRules* Rules = LangModule->GetTextPreprocessingRules().Get();
+		    if (!Rules)
+		    {
+			    LINGO_LOG(
+			        EVerbosityLevel::Error,
+			        TEXT("Language module %s does not contain valid text preprocessing rules. Cannot preprocess text. Please re-import your "
+			             "language pack."),
+			        *LangModule->ModuleID
+			    );
+		    }
+		    return Rules;
+	    },
+	    Input.DefaultEmotion
+	);
+	if (!bPreprocessed)
+	{
+		LINGO_LOG(EVerbosityLevel::Error, TEXT("Text preprocessing failed. See earlier logs for details."));
+		return false;
+	}
+	LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Preprocessed input:\n%s"), *Input.ToJson());
 
 #if WITH_EDITOR
 	// Editor-only data caching. Delegates are not thread-safe so we broadcast to the game thread.
@@ -522,8 +596,6 @@ bool Thespeon::Inference::ThespeonInference::ExecuteInference()
 	bool bIsFirstSegment = true;
 	int64 lastLanguageKey = -1;
 	TMap<FString, TArray<FString>> UnknownWordsByISO;
-	TMap<FString, TSharedPtr<Thespeon::Language::LanguageModule, ESPMode::ThreadSafe>> LanguageModules;
-	TMap<FString, TSharedPtr<Thespeon::Language::RuntimeLookupTable, ESPMode::ThreadSafe>> LookupTables;
 	for (const FLingotionInputSegment& Segment : Input.Segments)
 	{
 		if (Segment.bIsCustomPronounced)
@@ -533,35 +605,12 @@ bool Thespeon::Inference::ThespeonInference::ExecuteInference()
 		}
 		FString TargetISO639_2 = Segment.Language.ISO639_2;
 		LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Processing segment with target language: %s"), *TargetISO639_2);
-		Thespeon::Language::LanguageModule* LangModule = nullptr;
-		if (!LanguageModules.Contains(TargetISO639_2)) // Cache LM per language
+		// Preprocessing resolved every natural language segment's module and checked it has rules.
+		Thespeon::Language::LanguageModule* LangModule = ResolveLanguageModule(TargetISO639_2);
+		if (!LangModule)
 		{
-			LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("LanguageModule for ISO %s not in cache, loading..."), *TargetISO639_2);
-			FString* LangModuleID = CharacterModule->LanguageModuleIDs.Find(TargetISO639_2);
-			if (!LangModuleID)
-			{
-				LINGO_LOG(EVerbosityLevel::Error, TEXT("Character module has no language: %s"), *TargetISO639_2);
-				return false;
-			}
-			Thespeon::Core::FModuleEntry LangEntry = ManifestHandler->GetLanguageModuleEntry(*LangModuleID);
-			TSharedPtr<Thespeon::Language::LanguageModule, ESPMode::ThreadSafe> LangModulePtr =
-			    ModuleManager->GetModule<Thespeon::Language::LanguageModule>(LangEntry);
-			if (!LangModulePtr)
-			{
-				LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to get LanguageModule"));
-				return false;
-			}
-			LINGO_LOG_FUNC(
-			    EVerbosityLevel::Debug,
-			    TEXT("Got LanguageModule: %s, %s, %s"),
-			    *(LangModulePtr->ModuleID),
-			    *(LangModulePtr->JSONPath),
-			    *(LangModulePtr->Version.ToString())
-			);
-			LanguageModules.Add(TargetISO639_2, LangModulePtr);
+			return false;
 		}
-
-		LangModule = LanguageModules[TargetISO639_2].Get();
 		if (!LookupTables.Contains(TargetISO639_2)) // Cache LT per language
 		{
 			FString LookupTableMD5 = LangModule->GetLookupTableID();
@@ -574,17 +623,24 @@ bool Thespeon::Inference::ThespeonInference::ExecuteInference()
 			}
 			LookupTables.Add(TargetISO639_2, LookupTablePtr);
 		}
-		FString StrippedText = Segment.Text.Replace(*FString(1, &Thespeon::ControlCharacters::AudioSampleRequest), TEXT(""), ESearchCase::IgnoreCase);
-		TArray<FString> UnknownWords = GetUnknownWords(StrippedText, LangModule, LookupTables[TargetISO639_2].Get());
-		if (UnknownWords.Num() > 0)
+		FString StrippedText =
+		    Segment.Text.Replace(*FString::Chr(Thespeon::ControlCharacters::AudioSampleRequest), TEXT(""), ESearchCase::CaseSensitive);
+		TArray<FString> UnknownWords =
+		    GetUnknownWords(StrippedText, LangModule->GetTextPreprocessingRules()->GetWords(), LookupTables[TargetISO639_2].Get());
+		TArray<FString>& LanguageUnknownWords = UnknownWordsByISO.FindOrAdd(TargetISO639_2);
+		for (FString& Word : UnknownWords)
 		{
-			UnknownWordsByISO.FindOrAdd(TargetISO639_2).Append(MoveTemp(UnknownWords));
+			LanguageUnknownWords.AddUnique(MoveTemp(Word));
 		}
 	}
 
 	// Phase 2: Run batched phonemization per language. Results are cached in lookup tables.
 	for (const TPair<FString, TArray<FString>>& Pair : UnknownWordsByISO)
 	{
+		if (Pair.Value.Num() == 0)
+		{
+			continue;
+		}
 		const FString& ISO639_2 = Pair.Key;
 		const TArray<FString>& WordsToPhonemize = Pair.Value;
 		PhonemizeBatch(WordsToPhonemize, LanguageModules[ISO639_2].Get(), LookupTables[ISO639_2].Get(), &WorkloadCache, InputConfig);
@@ -599,7 +655,7 @@ bool Thespeon::Inference::ThespeonInference::ExecuteInference()
 
 	// Emotion keypoints: collect distinct emotions used across all segments' Start/End blends
 	// (first-appearance order). Each becomes a row in the k×N emotions / emotion_blending tensors.
-	// Assumes ValidateAndPopulate has already sanitized the blends (no EEmotion::None, weights sum to 1).
+	// Assumes text preprocessing has already sanitized the blends (no EEmotion::None, weights sum to 1).
 	TArray<EEmotion> DistinctEmotions;
 	TMap<EEmotion, int32> EmotionRow;
 	for (const FLingotionInputSegment& Segment : Input.Segments)
@@ -680,7 +736,13 @@ bool Thespeon::Inference::ThespeonInference::ExecuteInference()
 			FString TargetISO639_2 = Segment.Language.ISO639_2;
 			Thespeon::Language::LanguageModule* LangModule = LanguageModules[TargetISO639_2].Get();
 			if (!PhonemizeSegment(
-			        Segment, CharacterModule, LookupTables[TargetISO639_2].Get(), SegmentTxtEncoded, AudioSampleRequestGlobalIndices, TextLengthSoFar
+			        Segment,
+			        LangModule->GetTextPreprocessingRules()->GetWords(),
+			        CharacterModule,
+			        LookupTables[TargetISO639_2].Get(),
+			        SegmentTxtEncoded,
+			        AudioSampleRequestGlobalIndices,
+			        TextLengthSoFar
 			    ))
 			{
 				LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to process words with lookup table pipeline"));
@@ -1016,6 +1078,115 @@ bool Thespeon::Inference::ThespeonInference::TryUnloadCharacter(
 	if (!ModuleManager->TryDeregisterModule(CharacterModule->ModuleID))
 	{
 		LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Did not deregister character module %s"), *(CharacterModule->ModuleID));
+	}
+
+	return true;
+}
+
+// Static method: Reports whether a character is fully loaded on a backend.
+//
+// Mirrors every effect of FPreloadSession::Run, which is also what synthesis runs to load on demand:
+// the character module workload, plus workload and lookup table for each imported language module.
+// The preload tasks run independently, so checking the character module alone would report true
+// while language tasks are still running, or after one of them failed.
+// Lookup tables are checked last per language because the preload registers them last.
+// A preload cancelled after all registrations finished still reports failure, yet this returns true;
+// that is accurate, since the data is in fact loaded.
+bool Thespeon::Inference::ThespeonInference::IsLoaded(
+    const FString& CharacterName,
+    const EThespeonModuleType& ModuleType,
+    EBackendType BackendType,
+    UInferenceWorkloadManager* InferenceWorkloadManager,
+    UModuleManager* ModuleManager,
+    ULookupTableManager* LookupTableManager,
+    UManifestHandler* Manifest
+)
+{
+	if (!Manifest || !ModuleManager || !InferenceWorkloadManager || !LookupTableManager)
+	{
+		LINGO_LOG(EVerbosityLevel::Error, TEXT("One or more subsystem pointers are null"));
+		return false;
+	}
+
+	Thespeon::Core::FModuleEntry Entry = Manifest->GetCharacterModuleEntry(CharacterName, ModuleType);
+	if (Entry.ModuleID.IsEmpty())
+	{
+		LINGO_LOG_FUNC(
+		    EVerbosityLevel::Debug,
+		    TEXT("Character '%s' of module type '%s' is not imported, so it cannot be loaded."),
+		    *CharacterName,
+		    *UEnum::GetValueAsString(ModuleType)
+		);
+		return false;
+	}
+
+	// Checked before GetModule because GetModule with ShouldCreate=false logs at Error on a miss,
+	// and "not loaded" is an expected answer here rather than a fault.
+	if (!ModuleManager->IsRegistered(Entry.ModuleID))
+	{
+		LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Module '%s' is not registered."), *Entry.ModuleID);
+		return false;
+	}
+
+	TSharedPtr<Thespeon::Character::CharacterModule, ESPMode::ThreadSafe> CharacterModulePtr =
+	    ModuleManager->GetModule<Thespeon::Character::CharacterModule>(Entry, false);
+	if (!CharacterModulePtr)
+	{
+		// Only reachable if the module was deregistered between the check above and this lookup.
+		LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Module '%s' disappeared during lookup."), *Entry.ModuleID);
+		return false;
+	}
+
+	if (!InferenceWorkloadManager->IsRegistered(CharacterModulePtr.Get(), BackendType))
+	{
+		LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Module '%s' has no workloads registered on this backend."), *Entry.ModuleID);
+		return false;
+	}
+
+	// Same language set the preload iterates: LanguageModuleIDs already has the language fallback applied,
+	// and entries that are not imported are skipped there too.
+	int32 ImportedLanguageCount = 0;
+	for (const auto& Kvp : CharacterModulePtr->LanguageModuleIDs)
+	{
+		Thespeon::Core::FModuleEntry LangEntry = Manifest->GetLanguageModuleEntry(Kvp.Value);
+		if (LangEntry.ModuleID.IsEmpty())
+		{
+			continue;
+		}
+		++ImportedLanguageCount;
+
+		if (!ModuleManager->IsRegistered(LangEntry.ModuleID))
+		{
+			LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Language module '%s' is not registered."), *LangEntry.ModuleID);
+			return false;
+		}
+
+		TSharedPtr<Thespeon::Language::LanguageModule, ESPMode::ThreadSafe> LangModulePtr =
+		    ModuleManager->GetModule<Thespeon::Language::LanguageModule>(LangEntry, false);
+		if (!LangModulePtr)
+		{
+			LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Language module '%s' disappeared during lookup."), *LangEntry.ModuleID);
+			return false;
+		}
+
+		if (!InferenceWorkloadManager->IsRegistered(LangModulePtr.Get(), BackendType))
+		{
+			LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Language module '%s' has no workloads registered on this backend."), *LangEntry.ModuleID);
+			return false;
+		}
+
+		if (!LookupTableManager->IsTableRegistered(LangModulePtr.Get()))
+		{
+			LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Lookup table for language module '%s' is not registered."), *LangEntry.ModuleID);
+			return false;
+		}
+	}
+
+	if (ImportedLanguageCount == 0)
+	{
+		// The preload fails in this case, so the character is never usable for synthesis.
+		LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("None of the languages of module '%s' are imported."), *Entry.ModuleID);
+		return false;
 	}
 
 	return true;

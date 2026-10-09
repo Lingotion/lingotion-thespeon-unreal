@@ -8,6 +8,7 @@
 #include "Core/ModelInput.h"
 #include "Module.h"
 #include "Dom/JsonObject.h"
+#include "HAL/CriticalSection.h"
 #include "Language.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
@@ -18,17 +19,16 @@
  *
  * Contains the module identifier, originating name, JSON path,
  * character name, size tier string, and module version.
- * For now the ModuleId is the same as the Name.
  */
 struct FCharacterModuleInfo
 {
 	/** The unique module identifier. */
 	FString ModuleID;
 
-	/** The name of the origin file. */
+	/** The module's display name, from the "name" field of its config. */
 	FString Name;
 
-	/** The path to the JSON definition file. */
+	/** File name of the module's JSON config, relative to the RuntimeData directory. */
 	FString JsonPath;
 
 	/** The human-readable character name. */
@@ -52,10 +52,10 @@ struct FLanguageModuleInfo
 	/** The unique module identifier. */
 	FString ModuleID;
 
-	/** The name of the origin file. */
+	/** The module's display name, from the "name" field of its config. */
 	FString Name;
 
-	/** The path to the JSON definition file. */
+	/** File name of the module's JSON config, relative to the RuntimeData directory. */
 	FString JsonPath;
 
 	/** The human-readable language name. */
@@ -69,19 +69,24 @@ struct FLanguageModuleInfo
 };
 
 /**
- * Multicast delegate broadcast when manifest data changes.
+ * Multicast delegate intended for signaling manifest data changes.
  *
- * Can be used by editor UI to refresh displayed module information.
+ * Not currently declared as a member, bound or broadcast anywhere.
  */
 DECLARE_MULTICAST_DELEGATE(FOnDataChanged);
 
 /**
- * Manages imported character and languages via the LingotionThespeonManifest.json registry.
+ * Manages imported characters and languages via the LingotionThespeonManifest.json registry.
  *
  * This engine subsystem reads and parses the manifest on initialization,
  * providing query methods for looking up character modules, language modules,
  * available characters, and supported languages. It serves as the central
  * registry for all imported models.
+ *
+ * Thread safety: the query methods are safe to call from any thread. Each takes a
+ * snapshot of the parsed manifest under a read lock and works from that, so a
+ * concurrent ReloadManifestFromDisk() cannot pull the data out from under an
+ * in-flight query. ReloadManifestFromDisk() itself is game-thread only.
  */
 UCLASS()
 class LINGOTIONTHESPEON_API UManifestHandler : public UEngineSubsystem
@@ -101,11 +106,18 @@ class LINGOTIONTHESPEON_API UManifestHandler : public UEngineSubsystem
 	void Deinitialize() override;
 
 	/**
-	 * Reads and parses the LingotionThespeonManifest.json file from the RuntimeData directory.
+	 * Reloads and parses the LingotionThespeonManifest.json file from the RuntimeData directory,
+	 * replacing the data all query methods read from.
 	 *
-	 * Populates the internal JSON root used by all query methods.
+	 * Called once on Initialize, and by the editor after it rewrites the manifest (module import
+	 * or deletion) to signal that the cached data is stale. If the file is missing, empty or
+	 * malformed the previous data is dropped rather than kept, so a deleted module stops
+	 * resolving immediately.
+	 *
+	 * Game thread only (not asserted). Queries running on worker threads stay valid across the swap, but two
+	 * concurrent reloads are not supported.
 	 */
-	void ReadManifest();
+	void ReloadManifestFromDisk();
 
 	/**
 	 * Returns the singleton instance of this subsystem.
@@ -146,14 +158,14 @@ class LINGOTIONTHESPEON_API UManifestHandler : public UEngineSubsystem
 	 *
 	 * @param CharacterName The name of the character to look up.
 	 * @param ModuleType The size tier of the desired module.
-	 * @return The matching FModuleEntry, or an empty entry if not found.
+	 * @return The matching FModuleEntry, or an empty entry if not found (an error is logged).
 	 */
 	Thespeon::Core::FModuleEntry GetCharacterModuleEntry(const FString& CharacterName, EThespeonModuleType ModuleType) const;
 
 	/**
-	 * Retrieves the module entry for a language module by its module name.
+	 * Retrieves the module entry for a language module by its manifest ID.
 	 *
-	 * @param ModuleName The name or identifier of the language module.
+	 * @param ModuleName The language module's manifest ID (base_module_id). Display names do not match.
 	 * @return The matching FModuleEntry, or an empty entry if not found.
 	 */
 	Thespeon::Core::FModuleEntry GetLanguageModuleEntry(const FString& ModuleName) const;
@@ -174,7 +186,8 @@ class LINGOTIONTHESPEON_API UManifestHandler : public UEngineSubsystem
 	 * This provides a coarse fallback by language alone.
 	 *
 	 * @param ISO639_2 The ISO 639-2 code to match against imported language modules.
-	 * @return The manifest ID of a matching language module, or an empty string if none serves it.
+	 * @return The manifest ID of a matching language module (case-insensitive; the first match in manifest order
+	 *         if several serve it), or an empty string if none serves it.
 	 */
 	FString FindLanguageModuleIDForISO(const FString& ISO639_2) const;
 
@@ -184,14 +197,14 @@ class LINGOTIONTHESPEON_API UManifestHandler : public UEngineSubsystem
 	 * Creates a list of language objects for all languages that the
 	 * specified character module can synthesize.
 	 *
-	 * @param ModuleName The character module name to query.
+	 * @param ModuleName The character module ID to query (e.g. a value returned by GetModuleTypesOfCharacter).
 	 * @return An array of FLingotionLanguage objects for all supported languages.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Lingotion Thespeon")
 	TArray<FLingotionLanguage> GetAllLanguagesInCharacterModule(const FString& ModuleName) const;
 
 	/**
-	 * Returns the names of all available characters across all imported files.
+	 * Returns the names of all characters across all imported character modules.
 	 *
 	 * @return A set of character name strings.
 	 */
@@ -232,14 +245,22 @@ class LINGOTIONTHESPEON_API UManifestHandler : public UEngineSubsystem
 	/**
 	 * Reads a version object from a JSON module definition.
 	 *
-	 * @param ModuleObj The JSON object containing version fields (major, minor, patch).
-	 * @return The parsed FVersion struct.
+	 * @param ModuleObj JSON object with a "version" sub-object holding integer major, minor and patch fields.
+	 * @return The parsed version, or an invalid FVersion (-1.-1.-1) if the sub-object is missing.
 	 */
 	Thespeon::Core::FVersion ReadVersionObject(const TSharedPtr<FJsonObject>& ModuleObj) const;
 
   private:
-	/** The parsed root JSON object from LingotionThespeonManifest.json  */
+	/**
+	 * The parsed root JSON object from LingotionThespeonManifest.json.
+	 *
+	 * Only ever replaced wholesale, never mutated in place, so a snapshot taken by a query stays
+	 * valid and immutable for as long as that query holds it. Access through GetRootSnapshot.
+	 */
 	TSharedPtr<FJsonObject> Root;
+
+	/** Guards assignment of Root against queries running on worker threads. */
+	mutable FRWLock RootLock;
 
 	/** Maps EThespeonModuleType enum values to their front-end display string (e.g., "XS", "M", "XL"). */
 	static inline const TMap<EThespeonModuleType, FString> ModuleTypeToFrontEndString = {
@@ -270,19 +291,31 @@ class LINGOTIONTHESPEON_API UManifestHandler : public UEngineSubsystem
 	};
 
 	/**
-	 * Checks whether the Root JSON object is null or invalid.
+	 * Returns the current manifest data for a query to work from.
 	 *
-	 * @return True if Root is invalid and cannot be used for queries, false otherwise.
+	 * Copying the pointer under the read lock keeps the data alive for the caller's whole query
+	 * even if ReloadManifestFromDisk() swaps in new data meanwhile.
+	 *
+	 * @return The parsed manifest root, or an invalid pointer if no manifest has been loaded.
 	 */
-	bool IsRootInvalid() const;
+	TSharedPtr<FJsonObject> GetRootSnapshot() const;
 
 	/**
-	 * Attempts to retrieve the character modules JSON object from the manifest.
+	 * Checks whether a manifest snapshot is null or invalid.
 	 *
+	 * @param InRoot The snapshot to check, as returned by GetRootSnapshot.
+	 * @return True if the snapshot cannot be used for queries, false otherwise.
+	 */
+	static bool IsRootInvalid(const TSharedPtr<FJsonObject>& InRoot);
+
+	/**
+	 * Attempts to retrieve the character modules JSON object from a manifest snapshot.
+	 *
+	 * @param InRoot The snapshot to read from, as returned by GetRootSnapshot.
 	 * @param OutCharacterModulesPtr Output parameter that receives the character modules JSON object.
 	 * @return True if the character modules were found and extracted, false otherwise.
 	 */
-	bool TryGetCharacterModules(TSharedPtr<FJsonObject>& OutCharacterModulesPtr) const;
+	static bool TryGetCharacterModules(const TSharedPtr<FJsonObject>& InRoot, TSharedPtr<FJsonObject>& OutCharacterModulesPtr);
 
 	/**
 	 * Iterates all valid character module entries, invoking Callback for each.

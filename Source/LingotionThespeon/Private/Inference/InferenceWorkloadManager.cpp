@@ -84,9 +84,10 @@ bool UInferenceWorkloadManager::RegisterModuleWorkload(
 		// With parallel per-module preload (TUNR-134: within a single PreloadCharacter call,
 		// language modules load in parallel via TaskGraph), multiple threads may call
 		// RegisterModuleWorkload concurrently — this prevents a data race on the map.
-		// Note: IsRegistered() with BackendType::None reads RegisteredWorkloads WITHOUT lock
-		// protection; this is safe because that path is only called from the game thread
-		// (deregistration via TryUnloadCharacter).
+		// IsRegistered() reads RegisteredWorkloads under the read lock, so concurrent readers
+		// (e.g. UThespeonComponent::IsLoaded polling during a preload) are safe. The
+		// check-then-act at the top of this function is still not atomic, which is why the
+		// Prototype.IsValid() guard above tolerates a concurrent registration winning the race.
 		//
 		// The full required set is recorded, not just the models loaded above: one shared with an
 		// already-registered module still counts as this module's dependency at unload time.
@@ -150,11 +151,16 @@ bool UInferenceWorkloadManager::TryDeregisterModuleWorkloads(
  * cannot work now that a metagraph device pin can make a workload ID name a different backend than
  * the one requested, and it was the source of register/unload disagreement even before that.
  *
+ * Takes the read lock because RegisteredWorkloads is written under the write lock from TaskGraph
+ * threads during parallel preload. Callers must not already hold WorkloadsLock — FRWLock is not
+ * re-entrant, so that would deadlock (see ULookupTableManager::RegisterLookupTable for the same trap).
+ *
  * @param Module - The module to check
  * @param BackendType - The backend type to check
  */
-bool UInferenceWorkloadManager::IsRegistered(Thespeon::Core::Module* Module, EBackendType BackendType)
+bool UInferenceWorkloadManager::IsRegistered(Thespeon::Core::Module* Module, EBackendType BackendType) const
 {
+	FReadScopeLock ReadLock(WorkloadsLock);
 	if (BackendType == EBackendType::None)
 	{
 		return !Module->RegisteredWorkloads.IsEmpty(); // Registered on any backend

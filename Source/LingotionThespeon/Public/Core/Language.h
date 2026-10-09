@@ -9,8 +9,8 @@
  * Identifies a language and dialect using standard linguistic codes.
  *
  * Multiple code systems are supported (ISO 639, Glottocode, ISO 3166) to allow
- * precise specification of languages and regional dialects. Used as a key in
- * character module language mappings. Can be used as a TMap key (provides GetTypeHash).
+ * precise specification of languages and regional dialects. Matching currently uses only
+ * ISO639_2 and ISO3166_1. Can be used as a TMap key (provides GetTypeHash).
  *
  * A default-constructed instance represents an undefined language ("NOLANG").
  */
@@ -23,11 +23,11 @@ struct FLingotionLanguage
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Language")
 	FString ISO639_2;
 
-	/** ISO 639-3 three-letter language code. More specific than ISO 639-2 for distinguishing individual languages. */
+	/** ISO 639-3 three-letter language code. More specific than ISO 639-2 for distinguishing individual languages. Not used by BestLanguageMatch. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Language")
 	FString ISO639_3;
 
-	/** Glottocode identifier for the language family or dialect (e.g. "stan1293" for Standard English). */
+	/** Glottocode identifier for the language family or dialect (e.g. "stan1293" for Standard English). Not used by BestLanguageMatch. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Language")
 	FString Glottocode;
 
@@ -35,15 +35,18 @@ struct FLingotionLanguage
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Language")
 	FString ISO3166_1;
 
-	/** ISO 3166-2 subdivision code (e.g. "US-TX"). Identifies sub-national language variants. */
+	/** ISO 3166-2 subdivision code (e.g. "US-TX"). Identifies sub-national language variants. Not used by BestLanguageMatch. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Language")
 	FString ISO3166_2;
 
-	/** Free-form dialect identifier for variants not covered by standard codes. */
+	/** Free-form dialect identifier for variants not covered by standard codes. Not used by BestLanguageMatch. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Language")
 	FString CustomDialect;
 
-	/** Human-readable display name, auto-generated from ISO639_2 and ISO3166_1 (e.g. "eng US"). */
+	/**
+	 * Human-readable display name, generated from ISO639_2 and ISO3166_1 (e.g. "eng US", or "eng " with a trailing
+	 * space when there is no region). Set only by the constructor and TryParseFromJson; editing the codes does not update it.
+	 */
 	UPROPERTY(BlueprintReadOnly, Category = "Language")
 	FString Name;
 
@@ -103,7 +106,7 @@ struct FLingotionLanguage
 	/**
 	 * @brief Checks whether this language is undefined.
 	 *
-	 * @return true if the language is undefined.
+	 * @return true only when ISO639_2 is "NOLANG". An empty string counts as defined.
 	 */
 	bool IsUndefined() const
 	{
@@ -113,7 +116,7 @@ struct FLingotionLanguage
 	/**
 	 * @brief Serializes this language to a JSON string.
 	 *
-	 * @return A JSON representation of all language code fields.
+	 * @return A JSON representation of all language code fields and Name.
 	 */
 	FString ToJson() const;
 
@@ -156,11 +159,12 @@ namespace Core
 {
 /**
  * @brief Finds the best matching language from a set of candidates.
- * Matches on ISO 639-2 first, then refines using additional codes when available.
+ * Scores ISO 639-2 first, then ISO 3166-1 as a tie-breaker (both case-insensitive). Other codes are ignored.
+ * If no candidate matches the language, a candidate that matches only the region can still be returned.
  *
  * @param Candidates The available languages to match against.
  * @param Query The desired language to find the best match for.
- * @return The best matching language from Candidates, or an undefined language if no match.
+ * @return The best matching language from Candidates, or an undefined language if neither language nor region matches.
  */
 FLingotionLanguage BestLanguageMatch(const TArray<FLingotionLanguage>& Candidates, const FLingotionLanguage& Query);
 } // namespace Core

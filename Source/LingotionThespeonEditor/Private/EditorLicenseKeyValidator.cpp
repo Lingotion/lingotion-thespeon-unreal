@@ -14,22 +14,28 @@
 #include "Interfaces/IPluginManager.h"
 
 bool FEditorLicenseKeyValidator::bVerifyInFlight = false;
+bool FEditorLicenseKeyValidator::bRevalidatePending = false;
+TArray<FEditorLicenseKeyValidator::FOnLicenseValidationResult> FEditorLicenseKeyValidator::PendingCallbacks;
 
 void FEditorLicenseKeyValidator::ValidateLicenseAsync(FOnLicenseValidationResult ResultCallback)
 {
-	const auto* Settings = GetDefault<UEditorThespeonSettings>();
-	FString LicenseKey = Settings->GetLicenseKey();
-	if (LicenseKey.IsEmpty())
+	// Single-in-flight guard: the key may have changed since the in-flight request was sent,
+	// so queue a fresh verification instead of answering from the current state.
+	if (bVerifyInFlight)
 	{
-		ResultCallback.ExecuteIfBound(false);
+		LINGO_LOG(EVerbosityLevel::Debug, TEXT("License verification already in flight; queuing another once it completes."));
+		bRevalidatePending = true;
+		if (ResultCallback.IsBound())
+		{
+			PendingCallbacks.Add(MoveTemp(ResultCallback));
+		}
 		return;
 	}
 
-	// Single-in-flight guard
-	if (bVerifyInFlight)
+	FString LicenseKey = UEditorThespeonSettings::GetLicenseKey();
+	if (LicenseKey.IsEmpty())
 	{
-		LINGO_LOG(EVerbosityLevel::Debug, TEXT("License verification already in flight; skipping."));
-		ResultCallback.ExecuteIfBound(Settings->ValidationState == ELicenseValidationState::Valid);
+		ResultCallback.ExecuteIfBound(ELicenseCheckResult::Inconclusive);
 		return;
 	}
 	bVerifyInFlight = true;
@@ -44,7 +50,7 @@ void FEditorLicenseKeyValidator::ValidateLicenseAsync(FOnLicenseValidationResult
 	{
 		bVerifyInFlight = false;
 		LINGO_LOG(EVerbosityLevel::Error, TEXT("Failed to build JSON payload for license verification."));
-		ResultCallback.ExecuteIfBound(false);
+		ResultCallback.ExecuteIfBound(ELicenseCheckResult::Inconclusive);
 		return;
 	}
 
@@ -55,26 +61,88 @@ void FEditorLicenseKeyValidator::ValidateLicenseAsync(FOnLicenseValidationResult
 	Request->SetContentAsString(JsonPayload);
 
 	Request->OnProcessRequestComplete().BindLambda(
-	    [ResultCallback, DataSnapshot = MoveTemp(DataSnapshot)](FHttpRequestPtr Req, FHttpResponsePtr Resp, bool bSuccess)
+	    [ResultCallback, SentKey = LicenseKey, DataSnapshot = MoveTemp(DataSnapshot)](FHttpRequestPtr Req, FHttpResponsePtr Resp, bool bSuccess)
 	    {
 		    bVerifyInFlight = false;
-		    bool bIsValid = false;
 
-		    if (bSuccess && Resp.IsValid() && Resp->GetResponseCode() == 200)
+		    // Only an actual 200 validates and only an actual 400/401/403 rejects. Anything else
+		    // (offline, timeout, server errors, rate limiting, proxies) leaves the state untouched.
+		    ELicenseCheckResult Result = ELicenseCheckResult::Inconclusive;
+		    if (bSuccess && Resp.IsValid())
 		    {
-			    bIsValid = true;
-			    FEditorDataCache::SubtractAndPersist(DataSnapshot);
+			    const int32 ResponseCode = Resp->GetResponseCode();
+			    if (ResponseCode == 200)
+			    {
+				    Result = ELicenseCheckResult::Valid;
+				    FEditorDataCache::SubtractAndPersist(DataSnapshot);
+			    }
+			    else if (ResponseCode == 400 || ResponseCode == 401 || ResponseCode == 403)
+			    {
+				    Result = ELicenseCheckResult::Rejected;
+			    }
+			    else
+			    {
+				    LINGO_LOG(
+				        EVerbosityLevel::Info,
+				        TEXT("License verification returned unexpected status %d; keeping current license state."),
+				        ResponseCode
+				    );
+			    }
+		    }
+		    else
+		    {
+			    LINGO_LOG(EVerbosityLevel::Info, TEXT("License verification could not reach the server; keeping current license state."));
 		    }
 
-		    ResultCallback.ExecuteIfBound(bIsValid);
+		    // The key was edited while this request was in flight; its answer is for the old key.
+		    if (SentKey != UEditorThespeonSettings::GetLicenseKey())
+		    {
+			    Result = ELicenseCheckResult::Inconclusive;
+		    }
+
+		    ApplyResult(Result);
+		    ResultCallback.ExecuteIfBound(Result);
+
+		    if (bRevalidatePending)
+		    {
+			    bRevalidatePending = false;
+			    ValidateLicenseAsync(FOnLicenseValidationResult::CreateLambda(
+			        [Callbacks = MoveTemp(PendingCallbacks)](ELicenseCheckResult PendingResult)
+			        {
+				        for (const FOnLicenseValidationResult& Callback : Callbacks)
+				        {
+					        Callback.ExecuteIfBound(PendingResult);
+				        }
+			        }
+			    ));
+			    PendingCallbacks.Reset();
+		    }
 	    }
 	);
 
 	if (!Request->ProcessRequest())
 	{
+		// Unbind so a failure-path completion can't report a second time.
+		Request->OnProcessRequestComplete().Unbind();
 		bVerifyInFlight = false;
 		LINGO_LOG(EVerbosityLevel::Warning, TEXT("Failed to dispatch license verification request."));
-		ResultCallback.ExecuteIfBound(false);
+		ResultCallback.ExecuteIfBound(ELicenseCheckResult::Inconclusive);
+	}
+}
+
+void FEditorLicenseKeyValidator::ApplyResult(ELicenseCheckResult Result)
+{
+	if (Result == ELicenseCheckResult::Inconclusive)
+	{
+		return;
+	}
+
+	UEditorThespeonSettings* Settings = UEditorThespeonSettings::Get();
+	const ELicenseValidationState NewState = Result == ELicenseCheckResult::Valid ? ELicenseValidationState::Valid : ELicenseValidationState::Invalid;
+	if (Settings->ValidationState != NewState)
+	{
+		Settings->ValidationState = NewState;
+		Settings->SaveConfig(CPF_Config, *Settings->GetDefaultConfigFilename());
 	}
 }
 

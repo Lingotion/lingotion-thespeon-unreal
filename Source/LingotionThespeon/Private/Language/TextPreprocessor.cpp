@@ -1,349 +1,280 @@
 // Copyright 2025 - 2026 Lingotion AB All Rights Reserved
 
 #include "TextPreprocessor.h"
+#include "Core/KeypointUtils.h"
 #include "Core/LingotionLogger.h"
-#include "NumberConverter.h"
+#include "Language/TextPreprocessingRules.h"
 
-const TSet<TCHAR> FTextPreprocessor::AmbiguousApostrophes = {
-    0x2018, // LEFT SINGLE QUOTATION MARK
-    0x2019, // RIGHT SINGLE QUOTATION MARK
-    0x201B, // SINGLE HIGH-REVERSED-9 QUOTATION MARK
-    0x02BC, // MODIFIER LETTER APOSTROPHE
-    0x02BB, // MODIFIER LETTER TURNED COMMA
-    0xFF07, // FULLWIDTH APOSTROPHE
-    0x0060, // GRAVE ACCENT
-    0x00B4, // ACUTE ACCENT
-    0x2032, // PRIME
-    0x275B, // HEAVY SINGLE TURNED COMMA QUOTATION MARK ORNAMENT
-    0x275C, // HEAVY SINGLE COMMA QUOTATION MARK ORNAMENT
-    0x02C8, // MODIFIER LETTER VERTICAL LINE
-    0x02CA, // MODIFIER LETTER ACUTE ACCENT
-    0x02CB, // MODIFIER LETTER GRAVE ACCENT
-    0x1FEF, // GREEK VARIA
-    0x1FFD, // GREEK OXIA
-    0x1FBF, // GREEK PSILI
-    0x1FFE, // GREEK DASIA
-    0x0374, // GREEK NUMERAL SIGN
-    0x0384, // GREEK TONOS
-    0x055A, // ARMENIAN APOSTROPHE
-    0x07F4, // NKO HIGH TONE APOSTROPHE
-    0x07F5, // NKO LOW TONE APOSTROPHE
-    0x05F3, // HEBREW PUNCTUATION GERESH
-    0x05F4, // HEBREW PUNCTUATION GERSHAYIM
-    0xFE32  // PRESENTATION FORM FOR VERTICAL EN DASH
-};
-
-bool FTextPreprocessor::IsWordCharacter(TCHAR Char)
+namespace
 {
-	// Check for letters
-	return FChar::IsAlpha(Char) || IsApostrophe(Char);
-}
-
-bool FTextPreprocessor::IsApostrophe(TCHAR Char)
+bool IsOnlyMarkers(const FString& Text)
 {
-	// Explicitly check for standard apostrophe since amibiguous apostrophes are turned into it
-	return Char == StandardApostrophe;
-}
-
-TArray<FString> FTextPreprocessor::ExtractWords(const FString& Text)
-{
-	LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("called with text: %s"), *Text);
-	TArray<FString> Words;
-	int32 i = 0;
-	int32 TextLen = Text.Len();
-	const TCHAR* CharPtr = *Text;
-
-	while (i < TextLen)
+	for (const TCHAR C : Text)
 	{
-		// Skip non-word characters
-		while (i < TextLen && !IsWordCharacter(CharPtr[i]))
+		if (C != Thespeon::ControlCharacters::AudioSampleRequest)
 		{
-			++i;
-		}
-
-		int32 WordStart = i;
-
-		// Collect word characters (including apostrophes now)
-		while (i < TextLen && IsWordCharacter(CharPtr[i]))
-		{
-			++i;
-		}
-
-		if (i > WordStart)
-		{
-			Words.Add(Text.Mid(WordStart, i - WordStart));
+			return false;
 		}
 	}
-
-	return Words;
+	return true;
 }
+} // namespace
 
-FString FTextPreprocessor::TrimBasedOnPosition(const FString& Text, ETextPosition Position)
+bool FTextPreprocessor::PreprocessSegments(TArray<FLingotionInputSegment>& Segments, FRulesForLanguage RulesForLanguage, EEmotion DefaultEmotion)
 {
-	switch (Position)
+	TArray<FLingotionInputSegment> Result;
+	Result.Reserve(Segments.Num());
+	for (const FLingotionInputSegment& Segment : Segments)
 	{
-		case ETextPosition::First:
-			return Text.TrimStart();
-		case ETextPosition::Last:
-			return Text.TrimEnd();
-		case ETextPosition::Only:
-			return Text.TrimStartAndEnd();
-		case ETextPosition::Middle:
-		default:
-			return Text; // No trimming
-	}
-}
-
-FString FTextPreprocessor::CleanText(const FString& Input, ETextPosition Position)
-{
-	if (Input.IsEmpty())
-	{
-		return Input;
-	}
-
-	FString Result = TrimBasedOnPosition(Input, Position);
-
-	// Convert to lowercase
-	Result = Result.ToLower();
-
-	FString TempResult;
-
-	// Replace multiple whitespace characters with single space
-	TempResult.Reset();
-	TempResult.Reserve(Result.Len());
-
-	bool bPrevWasSpace = false;
-	bool bPrevWasASRChar = false;
-	for (int32 i = 0; i < Result.Len(); ++i)
-	{
-		if (FChar::IsWhitespace(Result[i]))
+		// The language's rules are not applied to custom pronunciation: several characters they rewrite are IPA
+		// symbols, such as U+02C8 (primary stress, also an apostrophe look-alike) and U+0303 (nasalisation,
+		// which composition would fold into the letter before it).
+		if (Segment.bIsCustomPronounced)
 		{
-			if (!bPrevWasSpace)
+			FLingotionInputSegment& Copy = Result.Add_GetRef(Segment);
+			Copy.Text = CollapseAudioSampleRequests(Segment.Text);
+			continue;
+		}
+		const Thespeon::Language::FTextPreprocessingRules* Rules = RulesForLanguage(Segment.Language);
+		if (!Rules)
+		{
+			return false; // RulesForLanguage logged why
+		}
+		if (!PreprocessSegment(Segment, *Rules, Result))
+		{
+			return false;
+		}
+	}
+	if (Result.Num() == 0)
+	{
+		LINGO_LOG(
+		    EVerbosityLevel::Error,
+		    TEXT("No text is left to synthesize after text preprocessing. Please make sure the segments contain text the language can read.")
+		);
+		return false;
+	}
+	if (!Thespeon::Core::PopulateEmotionKeypoints(Result, DefaultEmotion) || !Thespeon::Core::PopulateSpeedKeypoints(Result) ||
+	    !Thespeon::Core::PopulateLoudnessKeypoints(Result))
+	{
+		return false;
+	}
+	Segments = MoveTemp(Result);
+	LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Preprocessed into %d segments"), Segments.Num());
+	return true;
+}
+
+bool FTextPreprocessor::PreprocessSegment(
+    const FLingotionInputSegment& Segment, const Thespeon::Language::FTextPreprocessingRules& Rules, TArray<FLingotionInputSegment>& OutSegments
+)
+{
+	const FString Cleaned = CollapseAudioSampleRequests(Rules.ApplySteps(Segment.Text));
+	if (Cleaned.IsEmpty())
+	{
+		// The voice models' training drops a segment its cleanup empties, so the same is done here.
+		LINGO_LOG(
+		    EVerbosityLevel::Warning,
+		    TEXT("Segment '%s' has no text left after text preprocessing and is left out, together with its keypoints."),
+		    *Segment.Text
+		);
+		return true;
+	}
+
+	TArray<FSegmentPart> Parts;
+	bool bHasNumber = false;
+	for (Thespeon::Language::FNumberExpander::FPart& Part : Rules.GetNumbers().Partition(Cleaned))
+	{
+		bHasNumber |= Part.bIsNumber;
+		Parts.Add({MoveTemp(Part.Text), Part.bIsNumber, {}});
+	}
+	if (!bHasNumber)
+	{
+		FLingotionInputSegment& Copy = OutSegments.Add_GetRef(Segment);
+		Copy.Text = Cleaned;
+		return true;
+	}
+	int32 MarkerIndex = INDEX_NONE;
+	if (Segment.Text.FindChar(Thespeon::ControlCharacters::AudioSampleRequest, MarkerIndex))
+	{
+		Parts = MergeMarkerSeparatedNumbers(Parts);
+	}
+
+	TArray<FLingotionInputSegment> SplitSegments;
+	FLingotionInputSegment Current = MakeSplitSegment(Segment, FString(), false);
+	for (const FSegmentPart& Part : Parts)
+	{
+		FString PartText = Part.Text;
+		if (Part.bIsNumber)
+		{
+			FString Error;
+			if (!Rules.GetNumbers().Expand(Part.Text, PartText, Error))
 			{
-				TempResult.AppendChar(TEXT(' '));
-				bPrevWasSpace = true;
+				LINGO_LOG(EVerbosityLevel::Error, TEXT("Cannot speak out the number '%s': %s"), *Part.Text, *Error);
+				return false;
 			}
-			bPrevWasASRChar = false;
+			LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Converted number '%s' -> '%s' (CustomPronounced)"), *Part.Text, *PartText);
 		}
-		else if (Result[i] == Thespeon::ControlCharacters::AudioSampleRequest) // filter duplicate ASR chars
+		if (Part.MarkerFractions.Num() > 0)
 		{
-			if (!bPrevWasASRChar)
+			// Put the markers back at the same fraction of the spoken number as of the written one.
+			TArray<int32> Indices;
+			for (const float Fraction : Part.MarkerFractions)
 			{
-				TempResult.AppendChar(Thespeon::ControlCharacters::AudioSampleRequest);
-				bPrevWasASRChar = true;
+				// Half to even, as Unity's Mathf.RoundToInt does, so that both place a marker alike.
+				Indices.Add(static_cast<int32>(FMath::RoundHalfToEven(FMath::Clamp(Fraction, 0.0f, 1.0f) * PartText.Len())));
 			}
-			bPrevWasSpace = false;
+			Indices.Sort();
+			int32 Added = 0;
+			for (const int32 Index : Indices)
+			{
+				PartText.InsertAt(FMath::Clamp(Index, 0, PartText.Len() - Added) + Added, Thespeon::ControlCharacters::AudioSampleRequest);
+				++Added;
+			}
+		}
+		if (IsOnlyMarkers(Current.Text))
+		{
+			Current.bIsCustomPronounced = Part.bIsNumber;
+		}
+		// Text with nothing to pronounce (punctuation, spaces, markers) joins the segment before it rather than
+		// starting one. A number always starts one: it is made of digits, which the word definition does not
+		// count as a word.
+		const bool bNothingToPronounce = !Part.bIsNumber && !Rules.GetWords().ContainsWord(Part.Text);
+		if (Current.bIsCustomPronounced == Part.bIsNumber || bNothingToPronounce)
+		{
+			Current.Text += PartText;
 		}
 		else
 		{
-			TempResult.AppendChar(Result[i]);
-			bPrevWasSpace = false;
-			bPrevWasASRChar = false;
+			if (!Current.Text.IsEmpty())
+			{
+				SplitSegments.Add(MoveTemp(Current));
+			}
+			Current = MakeSplitSegment(Segment, PartText, Part.bIsNumber);
 		}
 	}
-
-	Result = TempResult;
-
-	// Normalize ambiguous apostrophes to standard apostrophe
-	TArray<TCHAR> Chars = Result.GetCharArray();
-	bool bModified = false;
-
-	for (int32 i = 0; i < Chars.Num() - 1; ++i) // -1 to exclude null terminator
+	if (!Current.Text.IsEmpty())
 	{
-		if (AmbiguousApostrophes.Contains(Chars[i]))
+		SplitSegments.Add(MoveTemp(Current));
+	}
+	if (SplitSegments.Num() == 0)
+	{
+		LINGO_LOG(EVerbosityLevel::Error, TEXT("Segment preprocessing unexpectedly produced no segments."));
+		return false;
+	}
+	ApplySplitKeypoints(Segment, SplitSegments);
+	OutSegments.Append(MoveTemp(SplitSegments));
+	return true;
+}
+
+FString FTextPreprocessor::CollapseAudioSampleRequests(const FString& Text)
+{
+	FString Result;
+	Result.Reserve(Text.Len());
+	for (const TCHAR C : Text)
+	{
+		if (C == Thespeon::ControlCharacters::AudioSampleRequest && !Result.IsEmpty() && Result[Result.Len() - 1] == C)
 		{
-			Chars[i] = StandardApostrophe;
-			bModified = true;
+			continue;
 		}
+		Result.AppendChar(C);
 	}
-
-	if (bModified)
-	{
-		Result = FString(Chars.GetData());
-	}
-
 	return Result;
 }
 
-const TMap<FString, FRegexPattern>& GetNumberPatterns()
+TArray<FTextPreprocessor::FSegmentPart> FTextPreprocessor::MergeMarkerSeparatedNumbers(const TArray<FSegmentPart>& Parts)
 {
-	static const TMap<FString, FRegexPattern> NumberPatterns = {
-	    {TEXT("eng"), FRegexPattern(TEXT("(\\d+(\\.\\d+)?)(st|nd|rd|th)?"))}
-	    // Add new language patterns here:
-	    // { TEXT("swe"), FRegexPattern(TEXT("(\\d+)")) }
-	};
-	return NumberPatterns;
-}
+	auto IsMarkersOnly = [](const FSegmentPart& Part) { return !Part.bIsNumber && !Part.Text.IsEmpty() && IsOnlyMarkers(Part.Text); };
 
-const FRegexPattern& FTextPreprocessor::GetNumberPattern(const FString& Iso639_2)
-{
-	const FString LowerLang = Iso639_2.ToLower();
-	if (const FRegexPattern* Pattern = GetNumberPatterns().Find(LowerLang))
+	TArray<FSegmentPart> Result;
+	int32 i = 0;
+	while (i < Parts.Num())
 	{
-		return *Pattern;
-	}
-	LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("No pattern for '%s', using English default"), *Iso639_2);
-	return GetNumberPatterns().FindChecked(TEXT("eng"));
-}
-
-TArray<FLingotionInputSegment> FTextPreprocessor::SplitSegmentByNumbers(const FLingotionInputSegment& Segment)
-{
-	TArray<FLingotionInputSegment> ResultSegments;
-	auto MakeSplitSegment = [&Segment](const FString& Text, const bool bIsCustomPronounced)
-	{
-		TMap<EEmotion, float> EmptyStartEmotion;
-		TMap<EEmotion, float> EmptyEndEmotion;
-		return FLingotionInputSegment(Text, MoveTemp(EmptyStartEmotion), MoveTemp(EmptyEndEmotion), Segment.Language, bIsCustomPronounced);
-	};
-
-	// If segment is already custom pronounced, don't process it
-	if (Segment.bIsCustomPronounced)
-	{
-		ResultSegments.Add(Segment);
-		return ResultSegments;
-	}
-
-	const FString Iso639_2 = Segment.Language.ISO639_2.ToLower();
-
-	// Create the number converter for this language (returns nullptr if not supported)
-	TUniquePtr<Thespeon::Language::FNumberConverter> Converter = Thespeon::Language::FNumberConverterFactory::Create(Iso639_2);
-	if (!Converter)
-	{
-		LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Language '%s' not supported, returning segment unchanged"), *Iso639_2);
-		ResultSegments.Add(Segment);
-		return ResultSegments;
-	}
-	FString TextWithoutASR;
-	TArray<int32> ASRPositions;
-	ASRPositions.Reserve(Segment.Text.Len());
-
-	for (int32 i = 0; i < Segment.Text.Len(); ++i)
-	{
-		if (Segment.Text[i] == Thespeon::ControlCharacters::AudioSampleRequest)
+		if (!Parts[i].bIsNumber)
 		{
-			ASRPositions.Add(i);
+			Result.Add(Parts[i]);
+			++i;
+			continue;
 		}
-		else
+		// A chain number, markers, number, ... ends before part j.
+		int32 j = i + 1;
+		bool bCanMerge = false;
+		int32 TotalDigitsLength = Parts[i].Text.Len();
+		while (j < Parts.Num() && (Parts[j].bIsNumber || IsMarkersOnly(Parts[j])))
 		{
-			TextWithoutASR.AppendChar(Segment.Text[i]);
-		}
-	}
-
-	// Get the regex pattern for this language
-	const FRegexPattern& Pattern = GetNumberPattern(Iso639_2);
-	FRegexMatcher Matcher(Pattern, TextWithoutASR);
-
-	int32 LastEnd = 0;
-	bool bFoundNumbers = false;
-
-	while (Matcher.FindNext())
-	{
-		bFoundNumbers = true;
-		int32 MatchBegin = Matcher.GetMatchBeginning();
-		int32 MatchEnd = Matcher.GetMatchEnding();
-
-		// Count ASR characters before and within the match to adjust positions
-		int32 ASRCountBeforeMatch = 0;
-		int32 ASRCountWithinMatch = 0;
-
-		for (int32 i = 0; i < ASRPositions.Num(); ++i)
-		{
-			// Convert ASR position from original text to stripped text coordinates
-			// Since we iterate in order, i is the count of ASR chars before this one
-			int32 StrippedPos = ASRPositions[i] - i;
-
-			if (StrippedPos < MatchBegin)
+			if (Parts[j].bIsNumber)
 			{
-				ASRCountBeforeMatch++;
+				bCanMerge = true;
+				TotalDigitsLength += Parts[j].Text.Len();
 			}
-			else if (StrippedPos < MatchEnd)
+			++j;
+		}
+		if (!bCanMerge)
+		{
+			Result.Add(Parts[i]);
+			++i;
+			continue;
+		}
+		// The merged number without its markers, each marker kept as where it was, as a fraction of its length.
+		FSegmentPart Merged{Parts[i].Text, true, {}};
+		for (int32 k = i + 1; k < j; ++k)
+		{
+			if (Parts[k].bIsNumber)
 			{
-				ASRCountWithinMatch++;
+				Merged.Text += Parts[k].Text;
 			}
 			else
 			{
-				break; // No more ASR chars affect this match
+				const float Fraction = FMath::Clamp(static_cast<float>(Merged.Text.Len()) / TotalDigitsLength, 0.0f, 1.0f);
+				for (int32 m = 0; m < Parts[k].Text.Len(); ++m)
+				{
+					Merged.MarkerFractions.Add(Fraction);
+				}
 			}
 		}
-
-		// Adjust match positions to original text coordinates
-		MatchBegin += ASRCountBeforeMatch;
-		MatchEnd += ASRCountBeforeMatch + ASRCountWithinMatch;
-
-		// Add text segment before the number (if any)
-		if (MatchBegin > LastEnd)
-		{
-			ResultSegments.Add(MakeSplitSegment(Segment.Text.Mid(LastEnd, MatchBegin - LastEnd), false));
-
-			LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Added text segment: '%s'"), *ResultSegments.Last().Text);
-		}
-
-		// Get the matched number string and convert it to phonemes
-		const FString NumberStr = Segment.Text.Mid(MatchBegin, MatchEnd - MatchBegin);
-		const FString ConvertedNumber = Converter->ConvertNumber(NumberStr);
-
-		// Add the converted number as a custom pronounced segment
-		ResultSegments.Add(MakeSplitSegment(ConvertedNumber, true));
-
-		LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Converted number '%s' -> '%s' (CustomPronounced)"), *NumberStr, *ConvertedNumber);
-
-		LastEnd = MatchEnd;
+		LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Merged number '%s' with %d markers"), *Merged.Text, Merged.MarkerFractions.Num());
+		Result.Add(MoveTemp(Merged));
+		i = j;
 	}
+	return Result;
+}
 
-	// Add any remaining text after the last number
-	if (bFoundNumbers && LastEnd < Segment.Text.Len())
+FLingotionInputSegment FTextPreprocessor::MakeSplitSegment(const FLingotionInputSegment& Original, const FString& Text, bool bIsCustomPronounced)
+{
+	FLingotionInputSegment Segment = Original;
+	Segment.Text = Text;
+	Segment.bIsCustomPronounced = bIsCustomPronounced;
+	Segment.StartEmotion.Reset();
+	Segment.EndEmotion.Reset();
+	return Segment;
+}
+
+void FTextPreprocessor::ApplySplitKeypoints(const FLingotionInputSegment& Original, TArray<FLingotionInputSegment>& SplitSegments)
+{
+	SplitSegments[0].StartEmotion = Original.StartEmotion;
+	SplitSegments.Last().EndEmotion = Original.EndEmotion;
+
+	int32 TotalLength = 0;
+	for (const FLingotionInputSegment& Segment : SplitSegments)
 	{
-		ResultSegments.Add(MakeSplitSegment(Segment.Text.Mid(LastEnd), false));
-
-		LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Added trailing text segment: '%s'"), *ResultSegments.Last().Text);
+		TotalLength += Segment.Text.Len();
 	}
-
-	// If no numbers were found, return the original segment unchanged
-	if (!bFoundNumbers)
+	if (SplitSegments.Num() == 1 || TotalLength <= 1)
 	{
-		ResultSegments.Add(Segment);
+		SplitSegments[0].StartSpeed = Original.StartSpeed;
+		SplitSegments[0].EndSpeed = Original.EndSpeed;
+		SplitSegments[0].StartLoudness = Original.StartLoudness;
+		SplitSegments[0].EndLoudness = Original.EndLoudness;
+		return;
 	}
-	else
+	int32 Cursor = 0;
+	for (FLingotionInputSegment& Segment : SplitSegments)
 	{
-		// Splitting must not introduce emotion keypoints. Preserve only the
-		// original segment's outer endpoints on the resulting global span.
-		ResultSegments[0].StartEmotion = Segment.StartEmotion;
-		ResultSegments.Last().EndEmotion = Segment.EndEmotion;
-
-		// Speed and loudness have no unset representation. Sample the original
-		// linear ramps at each new boundary so splitting does not restart or bend
-		// either curve.
-		int32 TotalLength = 0;
-		for (const FLingotionInputSegment& ResultSegment : ResultSegments)
-		{
-			TotalLength += ResultSegment.Text.Len();
-		}
-
-		if (ResultSegments.Num() == 1 || TotalLength <= 1)
-		{
-			ResultSegments[0].StartSpeed = Segment.StartSpeed;
-			ResultSegments[0].EndSpeed = Segment.EndSpeed;
-			ResultSegments[0].StartLoudness = Segment.StartLoudness;
-			ResultSegments[0].EndLoudness = Segment.EndLoudness;
-		}
-		else
-		{
-			int32 Cursor = 0;
-			for (FLingotionInputSegment& ResultSegment : ResultSegments)
-			{
-				const int32 EndPosition = Cursor + ResultSegment.Text.Len() - 1;
-				const float StartAlpha = static_cast<float>(Cursor) / static_cast<float>(TotalLength - 1);
-				const float EndAlpha = static_cast<float>(EndPosition) / static_cast<float>(TotalLength - 1);
-				ResultSegment.StartSpeed = FMath::Lerp(Segment.StartSpeed, Segment.EndSpeed, StartAlpha);
-				ResultSegment.EndSpeed = FMath::Lerp(Segment.StartSpeed, Segment.EndSpeed, EndAlpha);
-				ResultSegment.StartLoudness = FMath::Lerp(Segment.StartLoudness, Segment.EndLoudness, StartAlpha);
-				ResultSegment.EndLoudness = FMath::Lerp(Segment.StartLoudness, Segment.EndLoudness, EndAlpha);
-				Cursor = EndPosition + 1;
-			}
-		}
+		const int32 EndPosition = Cursor + Segment.Text.Len() - 1;
+		const float StartAlpha = static_cast<float>(Cursor) / static_cast<float>(TotalLength - 1);
+		const float EndAlpha = static_cast<float>(EndPosition) / static_cast<float>(TotalLength - 1);
+		Segment.StartSpeed = FMath::Lerp(Original.StartSpeed, Original.EndSpeed, StartAlpha);
+		Segment.EndSpeed = FMath::Lerp(Original.StartSpeed, Original.EndSpeed, EndAlpha);
+		Segment.StartLoudness = FMath::Lerp(Original.StartLoudness, Original.EndLoudness, StartAlpha);
+		Segment.EndLoudness = FMath::Lerp(Original.StartLoudness, Original.EndLoudness, EndAlpha);
+		Cursor = EndPosition + 1;
 	}
-
-	LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Split into %d segments"), ResultSegments.Num());
-
-	return ResultSegments;
 }

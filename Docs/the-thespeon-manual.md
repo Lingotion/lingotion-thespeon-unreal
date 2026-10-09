@@ -16,6 +16,7 @@
     - [Input Building Blocks](#input-building-blocks)
     - [Mandatory Instructions](#mandatory-instructions)
     - [Optional Instructions](#optional-instructions)
+    - [Blending emotions and shaping delivery](#blending-emotions-and-shaping-delivery)
     - [Fallback Handling](#fallback-handling)
     - [Language Matching](#language-matching)
     - [Custom Pronunciation (IPA)](#custom-pronunciation-ipa)
@@ -43,12 +44,12 @@
 
 ## Overview
 
-This document is the comprehensive knowledge repository for the Lingotion Thespeon plugin. It covers all major concepts, features, and behaviors of the plugin. For implementation examples, refer to the sample scenes included in the plugin. For complete API signatures and type definitions, refer to the [API documentation](./API/).
+This document is the comprehensive knowledge repository for the Lingotion Thespeon plugin. It covers all major concepts, features, and behaviors of the plugin. For implementation examples, see the [Plugin Samples](./samples.md). For complete API signatures and type definitions, refer to the [API documentation](./API/).
 
 > [!IMPORTANT]
 > Thespeon may be used both in Blueprint and C++. Its common starting point is the [`UThespeonComponent`](./API/UThespeonComponent.md), which you may attach to any Actor or use directly in a Level Blueprint.
 
-Before reading this manual, we recommend completing the [Getting Started](./get-started-unreal.md) guide.
+Before reading this manual, we recommend completing the [Get Started](./get-started-unreal.md) guide.
 
 ---
 
@@ -58,7 +59,7 @@ The [`UThespeonComponent`](./API/UThespeonComponent.md) is the central interface
 
 ### Adding the Component
 
-`UThespeonComponent` is a `UActorComponent` that can be attached to any Actor in your level, or used directly in a Level Blueprint. It is a `BlueprintSpawnableComponent`, so it can be added through the editor's Add Component workflow or programmatically. Refer to the sample scenes included in the plugin for concrete setup examples in both Blueprint and C++.
+`UThespeonComponent` is a `UActorComponent` that can be attached to any Actor in your level, or used directly in a Level Blueprint. It is a `BlueprintSpawnableComponent`, so it can be added through the editor's Add Component workflow or programmatically. See the [Plugin Samples](./samples.md) for concrete setup examples in both Blueprint and C++.
 
 ### Synthesizing a Performance
 
@@ -67,26 +68,26 @@ The primary method of the Thespeon Component is `Synthesize`. You provide an ins
 The call initiates a background thread to leave your game thread unblocked.
 
 > [!NOTE]
-> `Synthesize` delivers generated audio through the `OnAudioReceived` delegate. You must bind this delegate and route the audio data to a playback component such as `UAudioStreamComponent` (included in the plugin). See the [Delegates and Events](#delegates-and-events) section and the [Getting Started](./get-started-unreal.md#your-first-synthesis-in-blueprint) guide for setup details.
+> `Synthesize` delivers generated audio through the `OnAudioReceived` delegate. You must bind this delegate and route the audio data to a playback component such as `UAudioStreamComponent` (included in the plugin). See the [Delegates and Events](#delegates-and-events) section and the [Get Started](./get-started-unreal.md#your-first-synthesis-in-blueprint) guide for setup details.
 
-If the requested character has not been preloaded, Thespeon will load it on demand before starting synthesis. This adds latency to the first call -- see [Preloading a Character](#preloading-a-character) for how to avoid this.
+If the requested character has not been preloaded, Thespeon will load it on demand before starting synthesis. This adds latency to the first call; see [Preloading a Character](#preloading-a-character) for how to avoid this.
 
 > [!NOTE]
-> Parallel synthesis across multiple `UThespeonComponent` instances is supported via workload pooling. Within a single component, subsequent synthesis requests are queued, with syntheses being prioritized over pending preloads.
+> Parallel synthesis across multiple `UThespeonComponent` instances is supported via workload pooling. Within a single component, further synthesis requests are queued, and queued syntheses take priority over pending preloads.
 
 ### Preloading a Character
 
 While `Synthesize` will automatically load a character if needed, the loading process takes time and significantly affects real-time performance. To avoid this, you can preload characters ahead of time using `PreloadCharacter`. Parallel preloading is supported. Provide the character name, [`EThespeonModuleType`](./API/EThespeonModuleType.md), and optionally an `FInferenceConfig` to specify whether to load to the CPU or GPU backend.
 
-`PreloadCharacter` is non-blocking -- the request is added to a queue and processed asynchronously. The `OnPreloadComplete` delegate fires when the operation finishes.
+`PreloadCharacter` is non-blocking: the request is added to a queue and processed asynchronously. The `OnPreloadComplete` delegate fires when the operation finishes.
 
 > [!CAUTION]
 > `PreloadCharacter` requires the specified character name and module type to exactly match an imported character module. Unlike `Synthesize`, it will not fall back to another character or module type if the specified combination is not found. Verify your imported modules in the Lingotion Thespeon Info window (`Window > Lingotion Thespeon Info`).
 
 > [!NOTE]
-> The backend chosen during preloading determines the backend on which `Synthesize` runs, regardless of any `FInferenceConfig` provided later to `Synthesize`.
+> `Synthesize` runs on the backend given in its own `FInferenceConfig`. If the character was preloaded on a different backend, it is loaded again on the requested one, so preload on the same backend you will synthesize with.
 
-The first synthesis for each character also has higher latency due to buffer initializations. Preloading with a mock synthesis beforehand can alleviate this.
+The first synthesis for each character also has higher latency because of buffer initialization. Preloading the character beforehand avoids most of this.
 
 ### Preloading a Character Group
 
@@ -101,7 +102,7 @@ Individual `OnPreloadComplete` delegates still fire for each entry in the group,
 
 ### Cancelling a Synthesis
 
-If you need to stop an ongoing synthesis, call `CancelSynthesis` on the `UThespeonComponent`. This terminates the current synthesis session without broadcasting `OnSynthesisFailed`. The `OnSynthesisFailed` delegate is only broadcast when a synthesis actually fails, not when it is cancelled by the user.
+If you need to stop an ongoing synthesis, call `CancelSynthesis` on the `UThespeonComponent`. This stops the synthesis session that is currently running without broadcasting `OnSynthesisFailed`; that delegate is only broadcast when a synthesis fails or is rejected, not when you cancel it. Requests still waiting in the queue are not cancelled.
 
 ### Checking Synthesis State
 
@@ -109,7 +110,7 @@ Use `IsSynthesizing` to check whether a synthesis session is currently in progre
 
 ### Resource Cleanup
 
-After synthesis completes, the loaded character module remains in memory until you explicitly call `TryUnloadCharacter` for that particular character module. This method removes references to the relevant resources so they can be reclaimed by the garbage collector. If you are done with a character and want to free memory, call `TryUnloadCharacter` with the character name, module type, and optionally the backend type.
+After synthesis completes, the loaded character module remains in memory until you explicitly call `TryUnloadCharacter` for that particular character module. This method releases its references to the module's resources so the memory can be reclaimed. If you are done with a character and want to free memory, call `TryUnloadCharacter` with the character name, module type, and optionally the backend type.
 
 > [!CAUTION]
 > `TryUnloadCharacter` requires the specified character name and module type to exactly match a currently loaded character module. Unlike `Synthesize`, it will not fall back to another character or module type. If no loaded module matches the specified combination, the call fails and returns `false`.
@@ -122,13 +123,13 @@ This section details how to control the way a character speaks by constructing t
 
 ### Input Building Blocks
 
-To produce a performance, you construct an `FLingotionModelInput` instance that specifies your instructions. One instance corresponds to one line of dialogue. Since a full line may contain several sub-line specific instructions, `FLingotionModelInput` is composed of separate segments through a list of [`FLingotionInputSegment`](./API/FLingotionInputSegment.md) instances. To each segment you may specify performance details such as emotion and language.
+To produce a performance, you construct an `FLingotionModelInput` instance that specifies your instructions. One instance corresponds to one line of dialogue. Since a line may need different instructions for different parts of it, `FLingotionModelInput` is split into segments: a list of [`FLingotionInputSegment`](./API/FLingotionInputSegment.md) instances. On each segment you may specify performance details such as emotion and language.
 
 For complete field definitions, see the API documentation for [`FLingotionModelInput`](./API/FLingotionModelInput.md) and [`FLingotionInputSegment`](./API/FLingotionInputSegment.md).
 
 ### Mandatory Instructions
 
-While Thespeon is capable of filling in the blanks in the absence of instructions, there are a few parameters that must always be present for a synthesis to not be rejected:
+While Thespeon is capable of filling in the blanks in the absence of instructions, a few parameters must always be present, or the synthesis is rejected:
 
 1. `FLingotionModelInput.Segments` must contain at least one `FLingotionInputSegment`.
 2. Each `FLingotionInputSegment` must have non-empty text.
@@ -141,9 +142,10 @@ The most impactful instruction is the choice of character, which is selected by 
 
 On each segment you may also specify:
 
-- `Emotion` -- the emotional tone for that segment, chosen from the [`EEmotion`](./API/EEmotion.md) enum.
-- `Language` -- the language and dialect for that segment, specified as an [`FLingotionLanguage`](./API/FLingotionLanguage.md) struct.
-- `bIsCustomPronounced` -- whether the segment text should be interpreted as IPA (International Phonetic Alphabet) rather than natural language. See [Custom Pronunciation (IPA)](#custom-pronunciation-ipa) for details.
+- `StartEmotion` and `EndEmotion`: emotion blends at the start and end of the segment. See [Blending emotions and shaping delivery](#blending-emotions-and-shaping-delivery).
+- `Language`: the language and dialect for that segment, specified as an [`FLingotionLanguage`](./API/FLingotionLanguage.md) struct.
+- `bIsCustomPronounced`: whether the segment text should be interpreted as IPA (International Phonetic Alphabet) rather than natural language. See [Custom Pronunciation (IPA)](#custom-pronunciation-ipa) for details.
+- `StartSpeed`, `EndSpeed`, `StartLoudness` and `EndLoudness`: speed and loudness multipliers at the start and end of the segment, where `1.0` is normal. See [Blending emotions and shaping delivery](#blending-emotions-and-shaping-delivery).
 
 > [!WARNING]
 > For a character to speak a given language, the character must support it and you must also have imported the relevant language module into your Unreal project.
@@ -157,16 +159,16 @@ ModelInput.Segments = {
         TEXT("Hi! This is my voice "),
         { { EEmotion::Joy, 1.0f } }, //StartEmotion
         { { EEmotion::Joy, 0.5f }, { EEmotion::Anticipation, 0.5f } }, //EndEmotion
-        FLingotionLanguage(), //Language 
+        FLingotionLanguage(), //Language
         false, //bIsCustomPronounced
-        1.0f, //StartSpeed 
-        1.2f //EndSpeed 
+        1.0f, //StartSpeed
+        1.2f //EndSpeed
     ),
     FLingotionInputSegment(
         TEXT("generated in real time!"),
         { { EEmotion::Anticipation, 1.0f } }, //StartEmotion
         { { EEmotion::Anger, 1.0f } },  //EndEmotion
-        FLingotionLanguage(), //Language 
+        FLingotionLanguage(), //Language
         false, //bIsCustomPronounced
         1.0f, //StartSpeed
         1.0f, //EndSpeed
@@ -189,39 +191,46 @@ Segment.EndSpeed = 1.2f;
 Weights are clamped to `[0,1]` and normalized to sum to 1. All the boundary values across the input act as keypoints on a single curve over the whole line, so values are interpolated smoothly between the keypoints you supply, held flat before the first and after the last one, and may jump where one segment ends and the next begins. Passing an empty blend (or one containing only `EEmotion::None`) means "no opinion here" and lets the curve pass straight through that boundary.
 
 > [!NOTE]
-> The single `Emotion` field is the legacy form: setting it is equivalent to giving both boundaries a blend of that one emotion at full weight.
+> The single `Emotion` field is a legacy form. Only the C++ `FLingotionInputSegment` constructor that takes an `EEmotion` turns it into a full-weight start and end blend. Setting the field directly, including in Blueprint, currently has no effect on synthesis, so use `StartEmotion` and `EndEmotion` instead.
 
 > [!TIP]
-> For the full list of available emotions, see the [`EEmotion` enum](./API/EEmotion.md). Language codes follow [ISO 639-3](https://en.wikipedia.org/wiki/ISO_639-3) (e.g. `"eng"` for English, `"swe"` for Swedish). Available languages and dialects for your character are shown in the **Characters** tab of the Thespeon Info Window. 
+> For the full list of available emotions, see the [`EEmotion` enum](./API/EEmotion.md). Language codes follow [ISO 639-2](https://en.wikipedia.org/wiki/ISO_639-2) (e.g. `"eng"` for English, `"swe"` for Swedish). The languages and dialects available for your character are shown in the Lingotion Thespeon Info window.
+
 ---
 
 ### Fallback Handling
 
-When `Emotion` and `Language` are not specified on a segment, they are replaced by fallback values from increasingly broader scopes. The fallback chain is:
+When a segment does not specify its language, it is replaced by a fallback value from increasingly broader scopes. The fallback chain is:
 
-1. **Segment-level values** -- `FLingotionInputSegment.Emotion` and `FLingotionInputSegment.Language`
-2. **Input-level defaults** -- `FLingotionModelInput.DefaultEmotion` and `FLingotionModelInput.DefaultLanguage`
-3. **Config-level fallbacks** -- `FInferenceConfig.FallbackEmotion` and `FInferenceConfig.FallbackLanguage`
-4. **Global defaults** -- The values configured in the [Runtime Settings](#runtime-settings) panel
+1. **Segment-level value**: `FLingotionInputSegment.Language`
+2. **Input-level default**: `FLingotionModelInput.DefaultLanguage`
+3. **Config-level fallback**: `FInferenceConfig.FallbackLanguage`
+4. **Global default**: the value configured in the [Runtime Settings](#runtime-settings) panel
+
+Emotion works a little differently, because it is a curve over the whole line rather than a per-segment value. A segment whose `StartEmotion` or `EndEmotion` is left unset takes its value from the neighbouring segments' keypoints. Only when no segment sets an emotion at all does the line use `FLingotionModelInput.DefaultEmotion`, falling back to `FInferenceConfig.FallbackEmotion` and then the Runtime Settings default.
 
 ### Language Matching
 
-At synthesis time, each finally determined language instruction is matched to its closest available option if it is not an exact match. For example, if your character speaks English specifically with a Swedish accent and you provide the instruction "eng" for English, the character will assume you mean English with a Swedish accent and select the closest match.
+At synthesis time, each resolved language instruction that is not an exact match is matched to the closest available option. For example, if your character speaks English specifically with a Swedish accent and you provide the instruction "eng" for English, the character will assume you mean English with a Swedish accent and select the closest match.
 
 The [`FLingotionLanguage`](./API/FLingotionLanguage.md) struct supports multiple code systems for precise language identification: ISO 639-2 (primary 3-letter code), ISO 639-3 (specific language code), Glottocode (family/dialect identifier), ISO 3166-1 and ISO 3166-2 (country and subdivision codes), and a `CustomDialect` field for free-form dialect specification.
 
 ### Custom Pronunciation (IPA)
 
-If a segment is not marked as `bIsCustomPronounced`, Thespeon will internally convert its natural-language text into IPA (International Phonetic Alphabet) script before starting synthesis. Common words (~125 000 English words) are efficiently converted while uncommon words need some extra processing. Thespeon remembers every conversion it makes for each language family (based on its ISO639-2 code), as long as any character using that language family remains loaded in memory. This makes future conversions faster and more efficient.
+If a segment is not marked as `bIsCustomPronounced`, Thespeon will internally convert its natural-language text into IPA (International Phonetic Alphabet) script before starting synthesis. Common words (about 125,000 English words) are converted quickly, while uncommon words need some extra processing. Thespeon remembers every conversion it makes for each language family (based on its ISO 639-2 code) for as long as any character using that language family remains loaded. This makes future conversions faster and more efficient.
 
-When `bIsCustomPronounced` is set to `true` on a segment, the text field is directly interpreted as IPA, meaning a bypass of the conversion process. This allows precise control over pronunciation for names, technical terms, or non-standard words that the default text-to-phoneme conversion may not handle correctly. Furthermore the bypass means less processing and can as such be an effective way of reducing latency, especially for uncommon words.
+Before that conversion, natural-language text is prepared by the text preprocessing rules that ship with the language pack: characters are normalized (letter case, accents, look-alike apostrophes, whitespace), numbers such as `44`, `21st` and `3.14` are spoken out, and the text is split into the words that are looked up. Because the rules come with the pack, every Thespeon engine reads text the same way, and how a language is read can improve with a new pack. A language pack imported before the rules existed cannot be used for synthesis; synthesis then fails with a message asking you to re-import your language pack.
+
+When `bIsCustomPronounced` is set to `true` on a segment, the text is interpreted directly as IPA and the conversion step is skipped. This allows precise control over pronunciation for names, technical terms, or non-standard words that the default text-to-phoneme conversion may not handle correctly. Skipping the conversion also means less processing, so it can be an effective way to reduce latency, especially for uncommon words.
+
+IPA segments also bypass text preprocessing, so the symbols you write are the symbols Thespeon uses - letter case, spacing and accents included. Only consecutive Audio Sample Request markers are merged into one. For keyboards that cannot type it, a plain ASCII apostrophe (`'`) is accepted as a stand-in for the IPA primary stress mark (`ˈ`, U+02C8).
 
 ### Validating Your Input
 
-If you are unsure whether your instructions are clear enough for Thespeon to understand, you can check their validity using [`FLingotionModelInput::ValidateAndPopulate`](./API/FLingotionModelInput.md). This method inspects your `FLingotionModelInput` instance, auto-completes missing values, and replaces any invalid values with valid fallbacks. If any replacements are carried out, warnings are issued to the Thespeon logging system. To see these warnings, set the logging verbosity to at least Warning level in the [Runtime Settings](#runtime-settings).
+If you are unsure whether your instructions are clear enough for Thespeon to understand, you can check their validity using [`FLingotionModelInput::ValidateAndPopulate`](./API/FLingotionModelInput.md). This method inspects your `FLingotionModelInput` instance, auto-completes missing values, and replaces any invalid values with valid fallbacks. It does not change the segment text: text preprocessing happens during synthesis, with the rules of each segment's language pack. If any replacements are carried out, warnings are issued to the Thespeon logging system. To see these warnings, set the logging verbosity to at least Warning level in the [Runtime Settings](#runtime-settings).
 
 > [!NOTE]
-> `ValidateAndPopulate` only works properly if the intended character and module type are already loaded. You may use [`FLingotionModelInput::ValidateCharacterModule`](./API/FLingotionModelInput.md) to verify that your intended character is available in your project and update to an available one if not.
+> `ValidateAndPopulate` only works properly if the intended character and module type are already loaded. You may use [`FLingotionModelInput::ValidateCharacterModule`](./API/FLingotionModelInput.md) to verify that your intended character is available in your project, and to switch to an available one if it is not.
 
 ---
 
@@ -237,7 +246,7 @@ Use this delegate to process, record, route, or visualize the audio as it is gen
 
 ### OnAudioSampleRequestReceived
 
-Broadcast when the audio sample indices corresponding to all [Audio Sample Request](#audio-sample-request) control characters in the input text have been computed. The delegate provides the session ID and an ordered array of sample indices (left-to-right marker order). This is guaranteed to broadcast before the first OnAudioReceived from the same synthesis session letting you properly schedule your events before audio starts streaming.
+Broadcast when the audio sample indices corresponding to all [Audio Sample Request](#audio-sample-request) control characters in the input text have been computed. The delegate provides the session ID and an ordered array of sample indices (left-to-right marker order). It is guaranteed to broadcast before the first `OnAudioReceived` of the same synthesis session, so you can schedule your events before audio starts streaming.
 
 Combined with `OnAudioReceived`, this delegate enables precise synchronization of game events to specific moments in the spoken audio. See the [Audio Sample Request](#audio-sample-request) section for the full workflow.
 
@@ -247,25 +256,25 @@ Broadcast when the final audio packet has been delivered, indicating the synthes
 
 ### OnPreloadComplete
 
-Broadcast when a `PreloadCharacter` operation completes. Useful for signaling a character is fully prepared for on-demand performance. The delegate provides:
+Broadcast when a `PreloadCharacter` operation completes. Useful for signaling that a character is ready to perform on demand. The delegate provides:
 
-- `PreloadSuccess` -- whether the preload succeeded or failed
-- `CharacterName` -- the name of the character that was preloaded
-- `ModuleType` -- the module type that was preloaded
-- `BackendType` -- the backend to which the character was loaded
+- `PreloadSuccess`: whether the preload succeeded or failed
+- `CharacterName`: the name of the character that was preloaded
+- `ModuleType`: the module type that was preloaded
+- `BackendType`: the backend to which the character was loaded
 
 ### OnPreloadGroupComplete
 
 Broadcast when all preloads in a `PreloadCharacterGroup` call have completed. The delegate provides:
 
-- `PreloadGroupId` -- the group ID string passed to `PreloadCharacterGroup`
-- `bAllSucceeded` -- `true` if every individual preload in the group succeeded, `false` if any failed
+- `PreloadGroupId`: the group ID string passed to `PreloadCharacterGroup`
+- `bAllSucceeded`: `true` if every individual preload in the group succeeded, `false` if any failed
 
 This is useful for gating gameplay logic or UI state on the completion of an entire batch of preloads rather than tracking each one individually.
 
 ### OnSynthesisFailed
 
-Broadcast when a synthesis has failed due to an error. The delegate provides the session ID of the failed synthesis. Useful for backup handling in case of failure.
+Broadcast when a synthesis fails with an error, or when a request is rejected before it starts (an input with no segments, or no imported character or module to fall back to). The delegate provides the session ID of the failed synthesis. Useful for fallback handling.
 
 ---
 
@@ -275,11 +284,11 @@ Thespeon provides special control characters that can be embedded in your input 
 
 ### Pause
 
-The Pause control character tells Thespeon to insert a short pause of silence in the generated audio at the position where it appears in the text.
+The Pause control character tells Thespeon to insert a short silence in the generated audio at the position where it appears in the text.
 
 In Blueprint, use `ULingotionBlueprintLibrary::Pause()` (display name `GetPauseControlCharacter`) to obtain this character. In C++, use `Thespeon::ControlCharacters::Pause`.
 
-The Pause character is useful for controlling pacing in dialogue -- for example, creating dramatic pauses, emphasizing sentence boundaries, or adding natural breathing points. When using [custom pronunciation (IPA)](#custom-pronunciation-ipa), the Pause character can still be inserted within IPA text to create deliberate pauses between phonetic sequences.
+The Pause character is useful for controlling pacing in dialogue, for example creating dramatic pauses, emphasizing sentence boundaries, or adding natural breathing points. When using [custom pronunciation (IPA)](#custom-pronunciation-ipa), the Pause character can still be inserted within IPA text to create deliberate pauses between phonetic sequences.
 
 ### Audio Sample Request
 
@@ -296,27 +305,26 @@ The event synchronization workflow is as follows:
 
 This combination enables use cases such as lip sync, animation triggers, subtitle timing, or any event that must be synchronized to a specific word in the spoken dialogue.
 
-> [!IMPORTANT]
-> Currently, markers placed inside numerical or ordinal parts of the string are ignored. As a workaround, spell out the number in words and insert the marker as needed.
+> [!NOTE]
+> A marker placed inside a number, such as `3◎0th`, is kept at the same relative position in the spoken number. For precise placement within a number, spell it out in words and insert the marker where needed.
 
 ---
 
 ## Runtime Settings
 
-Thespeon provides a set of global default settings that can be configured through the Unreal Editor at `Edit > Project Settings > Lingotion Thespeon (Runtime)`. These settings serve as the base defaults for `FInferenceConfig` -- when you create a new `FInferenceConfig` instance, it automatically reads from these settings. You can always override the global defaults by providing a specific `FInferenceConfig` to individual `Synthesize` or `PreloadCharacter` calls for more granular control.
+Thespeon provides a set of global default settings that can be configured through the Unreal Editor at `Edit > Project Settings > Plugins > Lingotion Thespeon (Runtime)`. These settings serve as the base defaults for `FInferenceConfig`: when you create a new `FInferenceConfig` instance, it automatically reads from these settings. You can always override the global defaults by providing a specific `FInferenceConfig` to individual `Synthesize` or `PreloadCharacter` calls for more granular control.
 
 The following settings are available:
 
 | Setting | Description |
 |---------|-------------|
-| **Buffer Seconds** | How many seconds of audio should be synthesized until the first packet is sent |
+| **Buffer Seconds** | How many seconds of audio to synthesize before the first packet is sent |
 | **Default Backend** | Preferred backend for inference (CPU or GPU) |
 | **Default Module Type** | Preferred module type for inference |
 | **Default Emotion** | Preferred emotion for inference |
 | **Default Language** | Preferred language for inference |
-| **Default Inference Thread Priority** | Thread priority for inference processing threads. Higher priority enables real-time generation at the cost of higher resource use |
+| **Default Inference Thread Priority** | Thread priority for inference threads. Higher priority helps real-time generation at the cost of higher resource use |
 | **Verbosity Level** | Controls the verbosity of Thespeon logging output |
-
 
 > [!TIP]
 > If you find yourself repeatedly passing the same `FInferenceConfig` values, consider setting your preferred defaults in the Runtime Settings instead. Every new default `FInferenceConfig` instance will automatically inherit these values.
@@ -331,12 +339,11 @@ Thespeon provides several levers for tuning the balance between audio quality, r
 
 The [`EThespeonModuleType`](./API/EThespeonModuleType.md) setting determines the size tier of the character module used for synthesis. The available sizes, from smallest to largest, are: `XS`, `S`, `M`, `L`, and `XL`. The sizes eligible _in your project_ are directly determined by the _.lingotion_ file(s) you chose to download.
 
-Larger sizes produce better audio fidelity but require more computation and memory. Smaller sizes are faster and lighter but have reduced audio fidelity. Choosing the right size is a key performance lever -- for background NPCs, a smaller size may suffice, while main characters may warrant larger sizes. This is also a key factor to consider when building for different devices - large sizes will not be suitable for real-time generation if you expect target devices with limited compute capacity.
-
+Larger sizes produce better audio fidelity but require more computation and memory. Smaller sizes are faster and lighter but have reduced audio fidelity. Choosing the right size is a key performance lever: for background NPCs, a smaller size may suffice, while main characters may warrant larger sizes. This is also a key factor to consider when building for different devices, since large sizes are not suitable for real-time generation on target devices with limited compute capacity.
 
 ### Thread Priority
 
-The `FInferenceConfig.ThreadPriority` setting (of type [`EThreadPriorityWrapper`](./API/EThreadPriorityWrapper.md)) controls the OS-level priority of the inference worker thread. A higher priority enables more real-time audio generation but increases resource contention with the game thread and other engine subsystems. A lower priority conserves resources but may cause audio to generate too slowly for real-time playback.
+The `FInferenceConfig.ThreadPriority` setting (of type [`EThreadPriorityWrapper`](./API/EThreadPriorityWrapper.md)) controls the OS-level priority of the inference worker thread. A higher priority makes real-time audio generation more reliable but increases resource contention with the game thread and other engine subsystems. A lower priority conserves resources but may cause audio to generate too slowly for real-time playback.
 
 The available priority values are: `Lowest`, `BelowNormal`, `SlightlyBelowNormal`, `Normal`, `AboveNormal`, `Highest`, and `TimeCritical`. The default value is configured in the [Runtime Settings](#runtime-settings).
 
@@ -359,12 +366,12 @@ We recommend starting with **8 threads** for both settings and adjusting accordi
 
 The [`EBackendType`](./API/EBackendType.md) setting determines the hardware backend used for inference. The available options are:
 
-- `CPU` -- the default and safest option, works on all hardware.
-- `GPU` -- can be faster on systems with capable GPUs, but depends on NNE GPU backend availability.
-- `None` -- uses the default from [Runtime Settings](#runtime-settings).
+- `CPU`: the default and safest option, works on all hardware.
+- `GPU`: can be faster on systems with capable GPUs, but depends on NNE GPU backend availability.
+- `None`: uses the default from [Runtime Settings](#runtime-settings).
 
 > [!NOTE]
-> To run a character on a selected backend the character must be loaded on it. Synthesize will always load what it needs if it does not already exist, which takes extra time. For lower latency, consider preloading the character on the intended backend ahead of time.
+> To run a character on a selected backend, the character must be loaded on that backend. `Synthesize` loads whatever is missing, which takes extra time. For lower latency, consider preloading the character on the intended backend ahead of time.
 
 ### Buffer Seconds
 
@@ -374,6 +381,6 @@ The `FInferenceConfig.BufferSeconds` setting controls how many seconds of audio 
 
 ## Logging and Diagnostics
 
-Thespeon has its own logging system controlled by the Verbosity Level setting in the [Runtime Settings](#runtime-settings). The available levels, from least to most verbose, are: `None`, `Error`, `Warning`, `Info`, and `Debug`. Each level includes all messages from the levels above it.
+Thespeon has its own logging system controlled by the Verbosity Level setting in the [Runtime Settings](#runtime-settings). The available levels, from least to most verbose, are: `None`, `Error`, `Warning`, `Info`, and `Debug`. Each level also includes the messages of all less verbose levels.
 
-Setting the verbosity to at least `Warning` during development is recommended. At this level, you will see warnings issued by `ValidateAndPopulate` when it auto-corrects invalid input values, as well as warnings from the language matching system when an exact language match is not found. These messages appear in the Unreal Engine Output Log under the Lingotion Thespeon category.
+Setting the verbosity to at least `Warning` during development is recommended. At this level, you will see warnings issued by `ValidateAndPopulate` when it auto-corrects invalid input values, as well as warnings from the language matching system when an exact language match is not found. These messages appear in the Unreal Engine Output Log under the `LogLingotionThespeon` category.

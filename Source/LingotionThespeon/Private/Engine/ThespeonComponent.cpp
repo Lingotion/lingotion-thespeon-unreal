@@ -12,6 +12,7 @@
 #include "Serialization/BufferArchive.h"
 #include "Kismet/GameplayStatics.h"
 #include "Misc/FileHelper.h"
+#include "HAL/RunnableThread.h"
 
 // Custom destructors for forward-declared types (TUniquePtr requires complete type at destruction)
 void FThespeonInferenceDeleter::operator()(Thespeon::Inference::ThespeonInference* Ptr) const
@@ -238,19 +239,26 @@ void UThespeonComponent::ProcessPendingRequests()
 		);
 		return;
 	}
-	// Synthesis only waits for active preloads that are loading the *same* model it needs —
-	// unrelated preloads can keep running in parallel with synthesis.
-	if (!SynthRequestQueue.IsEmpty() && IsActivePreloadBlockingNextSynth())
-	{
-		LINGO_LOG_FUNC(
-		    EVerbosityLevel::Debug,
-		    TEXT("ProcessPendingRequests: synthesis request pending and its target model is being preloaded. Waiting for that preload.")
-		);
-		return;
-	}
+	// Rejected requests start no session, so nothing calls back into the queue for them. Keep dequeuing
+	// iteratively (not recursively, so a long run of rejections can't grow the stack) until one starts
+	// or the queue is empty; an empty queue falls through to launching preloads.
 	SynthRequest PoppedRequest;
-	if (SynthRequestQueue.Dequeue(PoppedRequest))
+	while (!SynthRequestQueue.IsEmpty())
 	{
+		// Synthesis only waits for active preloads that are loading the *same* model it needs —
+		// unrelated preloads can keep running in parallel with synthesis.
+		if (IsActivePreloadBlockingNextSynth())
+		{
+			LINGO_LOG_FUNC(
+			    EVerbosityLevel::Debug,
+			    TEXT("ProcessPendingRequests: synthesis request pending and its target model is being preloaded. Waiting for that preload.")
+			);
+			return;
+		}
+		if (!SynthRequestQueue.Dequeue(PoppedRequest))
+		{
+			break;
+		}
 		PreloadRequest CorrespondingPreload{
 		    PoppedRequest.Input.CharacterName,
 		    PoppedRequest.Input.ModuleType,
@@ -262,8 +270,15 @@ void UThespeonComponent::ProcessPendingRequests()
 			PreloadRequests.Remove(CorrespondingPreload); // remove explicit preload request and run it in RunSynth instead.
 		}
 		LINGO_LOG_FUNC(EVerbosityLevel::Info, TEXT("Dequeued synthesis request for session '%s'. Starting synthesis."), *PoppedRequest.SessionId);
-		RunSynthesisRequest(PoppedRequest);
-		return;
+		if (RunSynthesisRequest(PoppedRequest))
+		{
+			return;
+		}
+		// An OnSynthesisFailed listener may have called Synthesize and started a session in the meantime.
+		if (bIsSynthesizing.load())
+		{
+			return;
+		}
 	}
 
 	// Launch all queued preloads in parallel.
@@ -318,7 +333,8 @@ void UThespeonComponent::Synthesize(FLingotionModelInput Input, FString SessionI
 }
 
 // Runs synthesis. Validates input, starts audio streaming, and spawns a background inference thread.
-void UThespeonComponent::RunSynthesisRequest(SynthRequest Request)
+// Returns false and broadcasts OnSynthesisFailed if the request was rejected before a session started.
+bool UThespeonComponent::RunSynthesisRequest(SynthRequest Request)
 {
 	FLingotionModelInput Input = Request.Input;
 	FString SessionId = Request.SessionId;
@@ -330,7 +346,8 @@ void UThespeonComponent::RunSynthesisRequest(SynthRequest Request)
 		    TEXT("RunSynthesisRequest called while already synthesizing.")
 		); // This should never happen because ProcessPendingRequests checks
 		   // for this, but we check again here for extra safety.
-		return;
+		OnSynthesisFailed.Broadcast(SessionId);
+		return false;
 	}
 	if (Input.Segments.Num() == 0)
 	{
@@ -339,7 +356,8 @@ void UThespeonComponent::RunSynthesisRequest(SynthRequest Request)
 		    TEXT("Synthesize called with empty input segments. Ignoring this call. Make sure to provide at least one segment with text to synthesize."
 		    )
 		);
-		return;
+		OnSynthesisFailed.Broadcast(SessionId);
+		return false;
 	}
 	LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("ThespeonComponent Synthesize called with config: %s"), *InferenceConfig.ToString());
 
@@ -355,8 +373,8 @@ void UThespeonComponent::RunSynthesisRequest(SynthRequest Request)
 		    *Input.CharacterName,
 		    *UEnum::GetValueAsString(Input.ModuleType)
 		);
-		return; // mayhaps perchance do we want to make Synthesize return a bool indicating success/failure instead of just early returning without a
-		        // signal?
+		OnSynthesisFailed.Broadcast(SessionId);
+		return false;
 	}
 
 	TWeakObjectPtr<UThespeonComponent> WeakThis(this);
@@ -385,6 +403,7 @@ void UThespeonComponent::RunSynthesisRequest(SynthRequest Request)
 	);
 
 	bIsSynthesizing.store(true);
+	return true;
 }
 
 // Launches preloading on a background thread and broadcasts OnPreloadComplete on the game thread when done.
@@ -522,6 +541,19 @@ void UThespeonComponent::RunPreloadRequest(PreloadRequest Request)
 	PreloadThreads.Emplace(FRunnableThread::Create(ActivePreloadSessions.Last().Get(), TEXT("ThespeonPreloadThread"), 0, TPri_Normal));
 }
 
+bool UThespeonComponent::IsLoaded(FString CharacterName, EThespeonModuleType ModuleType, FInferenceConfig InferenceConfig)
+{
+	const EBackendType BackendType = ResolveBackend(GetDefaultBackendType(InferenceConfig.BackendType));
+
+	// Capture subsystem pointers on game thread — see the comment in RunPreloadRequest.
+	UInferenceWorkloadManager* WorkloadMgr = FLingotionThespeonSubsystemUtils::GetInferenceWorkloadManager();
+	UModuleManager* ModuleMgr = UModuleManager::Get();
+	ULookupTableManager* LookupMgr = ULookupTableManager::Get();
+	UManifestHandler* ManifestMgr = UManifestHandler::Get();
+
+	return Thespeon::Inference::ThespeonInference::IsLoaded(CharacterName, ModuleType, BackendType, WorkloadMgr, ModuleMgr, LookupMgr, ManifestMgr);
+}
+
 bool UThespeonComponent::TryUnloadCharacter(FString CharacterName, EThespeonModuleType ModuleType, EBackendType BackendType)
 {
 	BackendType = ResolveBackend(BackendType); // resolve directly to a correct type.
@@ -546,7 +578,7 @@ bool UThespeonComponent::TryUnloadCharacter(FString CharacterName, EThespeonModu
 
 // Dispatched on the game thread by the inference session whenever data is ready.
 // Routes packets by type: audio data is buffered until BufferSeconds is met, then flushed
-// to either the OnAudioReceived delegate or the AudioStreamComponent for playback.
+// to the OnAudioReceived delegate.
 void UThespeonComponent::PacketHandler(const FString& SessionID, const Thespeon::Core::FThespeonDataPacket& Packet)
 {
 	switch (Packet.CallbackType)

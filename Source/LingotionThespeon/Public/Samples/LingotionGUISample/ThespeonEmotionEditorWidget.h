@@ -34,6 +34,7 @@ class LINGOTIONTHESPEON_API UThespeonEmotionRowWidget : public UUserWidget
 	virtual void NativeOnInitialized() override;
 
 	UPROPERTY(meta = (BindWidget)) TObjectPtr<UComboBoxString> EmotionComboBox;
+	// Range is forced to 0-1 in code.
 	UPROPERTY(meta = (BindWidget)) TObjectPtr<USlider> IntensitySlider;
 	UPROPERTY(meta = (BindWidget)) TObjectPtr<UTextBlock> IntensityValueText;
 	UPROPERTY(meta = (BindWidget)) TObjectPtr<UButton> RemoveButton;
@@ -52,14 +53,20 @@ class LINGOTIONTHESPEON_API UThespeonEmotionRowWidget : public UUserWidget
 	bool bRefreshing = false;
 };
 
-/** Modal editor for an emotion TMap. Duplicate rows are combined and weights are normalized on submit. */
+/**
+ * Modal editor for an emotion blend (TMap<EEmotion, float>). Duplicate rows are summed, zero-weight rows are dropped
+ * and weights are normalized; an empty blend becomes None at 100%. Submit applies the result to the owner's selected
+ * segment and Cancel discards it. Both close the modal.
+ */
 UCLASS(Abstract, Blueprintable)
 class LINGOTIONTHESPEON_API UThespeonEmotionEditorWidget : public UUserWidget
 {
 	GENERATED_BODY()
 
   public:
+	/** Fills the modal with one row per emotion in InitialMap, sorted by enum value; adds a None row if the map is empty. */
 	void Open(UAdvancedThespeonWidget* InOwner, bool bInForStart, const TMap<EEmotion, float>& InitialMap);
+	/** Removes a row. Removing the last row adds a None row in its place. */
 	void RemoveRow(UThespeonEmotionRowWidget* Row);
 
 	/** Called by a row when its emotion or weight changes, so the live status preview can update. */
@@ -68,6 +75,7 @@ class LINGOTIONTHESPEON_API UThespeonEmotionEditorWidget : public UUserWidget
   protected:
 	virtual void NativeOnInitialized() override;
 
+	/** Row widget class. Required: if unset, no rows are created and EmotionStatusText asks you to assign it. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Lingotion Thespeon|Advanced GUI")
 	TSubclassOf<UThespeonEmotionRowWidget> EmotionRowClass;
 
@@ -75,6 +83,7 @@ class LINGOTIONTHESPEON_API UThespeonEmotionEditorWidget : public UUserWidget
 	UPROPERTY(meta = (BindWidget)) TObjectPtr<UButton> AddEmotionButton;
 	UPROPERTY(meta = (BindWidget)) TObjectPtr<UButton> SubmitEmotionButton;
 	UPROPERTY(meta = (BindWidget)) TObjectPtr<UButton> CancelEmotionButton;
+	// Optional live preview of the normalized blend.
 	UPROPERTY(meta = (BindWidgetOptional)) TObjectPtr<UTextBlock> EmotionStatusText;
 
   private:

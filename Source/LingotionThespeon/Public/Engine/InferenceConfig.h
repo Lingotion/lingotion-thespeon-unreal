@@ -15,14 +15,15 @@
  *
  * Bundles together the backend type, audio buffering, module quality tier,
  * fallback emotion/language, and thread priority settings used when
- * running synthesis on a ThespeonComponent.
+ * running synthesis on a UThespeonComponent.
  */
 USTRUCT(BlueprintType)
 struct LINGOTIONTHESPEON_API FInferenceConfig
 {
 	GENERATED_BODY()
 
-	/** The NNE backend to use for model inference (e.g., CPU, GPU). */
+	/** The NNE backend to use for model inference (CPU or GPU). None uses the project default. GPU is Windows-only; other platforms fall back to CPU.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Default Configuration")
 	EBackendType BackendType;
 
@@ -40,23 +41,30 @@ struct LINGOTIONTHESPEON_API FInferenceConfig
 	)
 	bool bForceRequestedBackend;
 
-	/** Seconds of audio to buffer before starting playback. Must be >= 0. */
+	/**
+	 * Seconds of audio to buffer before the first OnAudioReceived broadcast. Must be >= 0.
+	 * Currently always read from the project's runtime settings; a per-request value is ignored.
+	 */
 	UPROPERTY(EditAnywhere, Category = "Component Configuration", meta = (ClampMin = "0.0"))
 	float BufferSeconds;
 
-	/** The quality tier of the character module to use (XS, S, M, L, XL). */
+	/** Fallback module type (XS to XL), used when the model input's ModuleType is None or not imported. Preload and unload calls ignore it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Default Configuration")
 	EThespeonModuleType ModuleType;
 
-	/** The emotion to use when no emotion is specified per-segment. */
+	/**
+	 * Used when the model input's DefaultEmotion is None. It only takes effect if no segment sets an emotion;
+	 * otherwise segments without one interpolate from their neighbours.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Default Configuration")
 	EEmotion FallbackEmotion;
 
-	/** The language to use when no language is specified per-segment. */
+	/** Replaces an undefined DefaultLanguage on the model input. The result is matched against the character's languages, falling back to the first
+	 * one supported. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Default Configuration", meta = (ShowOnlyInnerProperties))
 	FLingotionLanguage FallbackLanguage;
 
-	/** The thread priority for the inference worker thread. */
+	/** The thread priority for the synthesis worker thread. Preload threads always run at normal priority. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Default Configuration")
 	EThreadPriorityWrapper ThreadPriority;
 

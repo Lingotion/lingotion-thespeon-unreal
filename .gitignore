@@ -14,6 +14,7 @@ Saved/
 *.VC.db
 *.VC.opendb
 Content/ # Remove this if we want to ship content
+.DS_Store
 
 # If your plugin has sample projects inside a Samples/ dir:
 Samples/**/Binaries/

@@ -15,12 +15,27 @@ class UTextBlock;
 class UTexture2D;
 class UThespeonComponent;
 
+/** How a dialogue session ended. */
+UENUM(BlueprintType)
+enum class EThespeonDialogueResult : uint8
+{
+	/** Synthesis finished and all audio was played. */
+	Completed,
+	/** Synthesis reported an error. */
+	Failed,
+	/** The dialogue was closed before it finished. */
+	Cancelled
+};
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnThespeonDialogueEnded, EThespeonDialogueResult, Result);
+
 /**
  * Controller for a full-screen dialogue overlay. A Widget Blueprint supplies the
  * layout and styling through the required bound widgets below.
  *
- * The overlay resolves the required actor components and owns synthesis, audio
- * streaming, word timing, cancellation, and completion for its session.
+ * On construct the overlay hides itself, spawns a transient actor holding its own Thespeon and audio
+ * stream components, and preloads every available character and module on the CPU backend. It then
+ * owns synthesis, audio streaming, word-timed text reveal, cancellation and completion for each session.
  */
 UCLASS(Abstract, Blueprintable)
 class LINGOTIONTHESPEON_API UThespeonDialogueOverlayWidget : public UUserWidget
@@ -29,15 +44,23 @@ class LINGOTIONTHESPEON_API UThespeonDialogueOverlayWidget : public UUserWidget
 
   public:
 	/**
-	 * Resolves components, adds inaudible word markers, shows the overlay, and
-	 * submits synthesis.
+	 * Starts a dialogue: cancels any synthesis still running, adds inaudible word markers, shows the
+	 * overlay and submits synthesis. Returns false if SessionID is empty or the components can't be created.
+	 * Does not fire OnDialogueEnded for a dialogue it replaces.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Lingotion Thespeon|Dialogue Overlay")
 	bool StartDialogue(FLingotionModelInput Input, const FString& SessionID, FInferenceConfig InferenceConfig, UTexture2D* CharacterPortraitTexture);
 
-	/** Cancels synthesis, clears queued playback, and removes the overlay. */
+	/**
+	 * Closes the overlay (collapses it; it stays in the widget tree). If playback has already finished it reports
+	 * Completed; otherwise it cancels synthesis, clears queued audio and reports Cancelled. Bound to CloseButton.
+	 */
 	UFUNCTION(BlueprintCallable, Category = "Lingotion Thespeon|Dialogue Overlay")
 	void CloseDialogue();
+
+	/** Fired once per dialogue when the overlay closes, with the reason it closed. */
+	UPROPERTY(BlueprintAssignable, Category = "Lingotion Thespeon|Dialogue Overlay")
+	FOnThespeonDialogueEnded OnDialogueEnded;
 
   protected:
 	virtual void NativeOnInitialized() override;
@@ -57,9 +80,12 @@ class LINGOTIONTHESPEON_API UThespeonDialogueOverlayWidget : public UUserWidget
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lingotion Thespeon|Dialogue Overlay", meta = (ClampMin = "0.01"))
 	float LoadingDotInterval = 0.35f;
 
+	// Collapsed when no portrait texture is passed to StartDialogue.
 	UPROPERTY(meta = (BindWidget)) TObjectPtr<UImage> CharacterPortrait;
 	UPROPERTY(meta = (BindWidget)) TObjectPtr<UTextBlock> CharacterNameText;
+	// Shows loading dots, then the line revealed in sync with playback.
 	UPROPERTY(meta = (BindWidget)) TObjectPtr<UTextBlock> DialogueText;
+	// Calls CloseDialogue.
 	UPROPERTY(meta = (BindWidget)) TObjectPtr<UButton> CloseButton;
 
   private:
@@ -73,7 +99,7 @@ class LINGOTIONTHESPEON_API UThespeonDialogueOverlayWidget : public UUserWidget
 	void RefreshDialogueText();
 	void ScheduleAutoClose();
 	void AutoCloseDialogue();
-	void CloseInternal(bool bInterruptPlayback);
+	void CloseInternal(EThespeonDialogueResult Result);
 	void BindDelegates();
 	void UnbindDelegates();
 	bool CreateOwnedComponents();

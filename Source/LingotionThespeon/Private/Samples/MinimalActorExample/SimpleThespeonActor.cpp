@@ -1,6 +1,6 @@
 // Copyright 2025 - 2026 Lingotion AB All Rights Reserved
 
-#include "ASimpleThespeonActor.h"
+#include "Samples/MinimalActorExample/SimpleThespeonActor.h"
 #include "Engine/ThespeonComponent.h"
 #include "Core/LingotionLogger.h"
 #include "Core/ModelInput.h"

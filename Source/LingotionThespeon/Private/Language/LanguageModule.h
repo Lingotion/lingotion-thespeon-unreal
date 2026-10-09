@@ -16,6 +16,8 @@ namespace Thespeon
 {
 namespace Language
 {
+class FTextPreprocessingRules;
+
 /**
  * Language-specific module handling grapheme-to-phoneme (G2P) conversion, vocabularies, and lookup tables.
  *
@@ -32,11 +34,22 @@ class LanguageModule : public Thespeon::Core::Module
 
 	LanguageModule(const Thespeon::Core::FModuleEntry& ModuleInfo);
 
+	/** @brief Returns the module type identifier ("language") without needing an instance.
+	 *
+	 *  The static counterpart to GetModuleType(), used by UModuleManager::GetModule<T> to verify a
+	 *  stored module really is a T before downcasting it.
+	 *
+	 *  @return The string "language". */
+	static FString StaticModuleType()
+	{
+		return TEXT("language");
+	}
+
 	/** @brief Returns the module type identifier ("language").
 	 *  @return The string "language". */
 	FString GetModuleType() const override
 	{
-		return TEXT("language");
+		return StaticModuleType();
 	}
 
 	/** @brief Encodes graphemes into their corresponding IDs based on the phonemizer vocabulary.
@@ -61,6 +74,13 @@ class LanguageModule : public Thespeon::Core::Module
 	 *  @return The MD5 hash string. */
 	FString GetLookupTableID() const;
 
+	/** @brief Gets the text preprocessing rules for this module's language, compiled once when the module loads.
+	 *  @return The rules, or nullptr if the module ships without valid ones. */
+	TSharedPtr<const FTextPreprocessingRules, ESPMode::ThreadSafe> GetTextPreprocessingRules() const
+	{
+		return TextPreprocessingRules;
+	}
+
   protected:
 	/** @brief Initializes the language module from a JSON definition string.
 	 *  @param JsonString The JSON content to parse.
@@ -76,6 +96,10 @@ class LanguageModule : public Thespeon::Core::Module
 
 	bool ParseJSON(const TSharedPtr<FJsonObject>& JsonObject, const TArray<TSharedPtr<FJsonValue>>& ModuleFiles);
 	void LoadVocabularies(const TSharedPtr<FJsonObject>& ModuleObj);
+	void LoadTextPreprocessingRules();
+
+	// Immutable once compiled, so shared by every synthesis session without locking.
+	TSharedPtr<const FTextPreprocessingRules, ESPMode::ThreadSafe> TextPreprocessingRules;
 };
 } // namespace Language
 } // namespace Thespeon

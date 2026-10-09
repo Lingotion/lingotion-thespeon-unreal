@@ -267,7 +267,7 @@ FReply FEditorInfoWindow::OnDeleteModuleClicked()
 	// Reload manifest and refresh UI after import
 	if (UManifestHandler* Handler = UManifestHandler::Get())
 	{
-		Handler->ReadManifest();
+		Handler->ReloadManifestFromDisk();
 	}
 	// Clear selection and disable delete button
 	SelectedModule.Reset();
@@ -282,18 +282,8 @@ FReply FEditorInfoWindow::OnDeleteModuleClicked()
 
 FReply FEditorInfoWindow::OnImportFileClicked()
 {
+	// Import rebuilds and reloads the manifest itself
 	FEditorFileImporter::Import();
-
-	if (UEditorFileWatcher* Watcher = UEditorFileWatcher::Get())
-	{
-		Watcher->UpdateMappingsInfo();
-	}
-
-	// Reload manifest and refresh UI after import
-	if (UManifestHandler* Handler = UManifestHandler::Get())
-	{
-		Handler->ReadManifest();
-	}
 	RebuildTabContent();
 
 	return FReply::Handled();
@@ -395,13 +385,13 @@ void FEditorInfoWindow::SetUIRoots(TSharedPtr<SVerticalBox> InLicenseRoot, TShar
 
 void FEditorInfoWindow::ValidateAndGate()
 {
-	// Validate the license, but do not rely on it to enable ThespeonWindow
-	// since it will not work if the user is offline. Use cached validation.
-
-	// Empty delegate as callback
-	FEditorLicenseKeyValidator::ValidateLicenseAsync(FEditorLicenseKeyValidator::FOnLicenseValidationResult());
-	const UEditorThespeonSettings* Settings = GetDefault<UEditorThespeonSettings>();
-	ToggleLicenseGate(Settings->ValidationState == ELicenseValidationState::Valid);
+	// Gate on the cached state right away so the window works offline, then re-gate once the
+	// server answers. Only a definitive answer (200 / 400 / 401 / 403) changes the cached state.
+	ToggleLicenseGate(GetDefault<UEditorThespeonSettings>()->ValidationState == ELicenseValidationState::Valid);
+	FEditorLicenseKeyValidator::ValidateLicenseAsync(FEditorLicenseKeyValidator::FOnLicenseValidationResult::CreateSPLambda(
+	    this,
+	    [this](ELicenseCheckResult) { ToggleLicenseGate(GetDefault<UEditorThespeonSettings>()->ValidationState == ELicenseValidationState::Valid); }
+	));
 }
 
 void FEditorInfoWindow::ToggleLicenseGate(bool bValid)

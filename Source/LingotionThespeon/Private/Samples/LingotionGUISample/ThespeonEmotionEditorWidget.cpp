@@ -33,6 +33,8 @@ void UThespeonEmotionRowWidget::PopulateEmotions()
 	EmotionOptions.Reset();
 	EmotionComboBox->ClearOptions();
 	const UEnum* EmotionEnum = StaticEnum<EEmotion>();
+	TArray<FString> SortedLabels;
+	FString NoneLabel;
 	for (int32 Index = 0; Index < EmotionEnum->NumEnums(); ++Index)
 	{
 		const int64 Value = EmotionEnum->GetValueByIndex(Index);
@@ -42,6 +44,20 @@ void UThespeonEmotionRowWidget::PopulateEmotions()
 		}
 		const FString Label = EmotionEnum->GetDisplayNameTextByIndex(Index).ToString();
 		EmotionOptions.Add(Label, static_cast<EEmotion>(Value));
+		if (static_cast<EEmotion>(Value) == EEmotion::None)
+		{
+			NoneLabel = Label;
+			continue;
+		}
+		SortedLabels.Add(Label);
+	}
+	SortedLabels.Sort([](const FString& A, const FString& B) { return A.Compare(B, ESearchCase::IgnoreCase) < 0; });
+	if (!NoneLabel.IsEmpty())
+	{
+		SortedLabels.Insert(NoneLabel, 0);
+	}
+	for (const FString& Label : SortedLabels)
+	{
 		EmotionComboBox->AddOption(Label);
 	}
 	bRefreshing = false;
@@ -199,11 +215,21 @@ void UThespeonEmotionEditorWidget::RemoveRow(UThespeonEmotionRowWidget* Row)
 TMap<EEmotion, float> UThespeonEmotionEditorWidget::ComputeNormalizedBlend() const
 {
 	TMap<EEmotion, float> Blend;
+	float TotalWeight = 0.0f;
 	for (const UThespeonEmotionRowWidget* Row : Rows)
 	{
 		if (Row && Row->GetWeight() > 0.0f)
 		{
 			Blend.FindOrAdd(Row->GetEmotion()) += Row->GetWeight();
+			TotalWeight += Row->GetWeight();
+		}
+	}
+	// Pre-normalize so combined duplicate rows can't exceed 1 and get clamped by the sanitizer.
+	if (TotalWeight > 0.0f)
+	{
+		for (TPair<EEmotion, float>& Pair : Blend)
+		{
+			Pair.Value /= TotalWeight;
 		}
 	}
 	if (!Thespeon::Core::SanitizeEmotionBlend(Blend))

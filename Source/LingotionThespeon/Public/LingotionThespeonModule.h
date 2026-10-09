@@ -13,8 +13,8 @@
 class LINGOTIONTHESPEON_API FLingotionThespeonModule : public IModuleInterface
 {
   public:
-	/** Called when the module is loaded. Performs plugin initialization. */
+	/** Called when the module is loaded. Only logs; the plugin's subsystems do the real setup. */
 	void StartupModule() override;
-	/** Called when the module is unloaded. Performs plugin cleanup. */
+	/** Called when the module is unloaded. Currently does nothing. */
 	void ShutdownModule() override;
 };

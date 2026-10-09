@@ -16,28 +16,33 @@ FString Text;
 ```
 
 ### `Emotion`
-Legacy single emotion used by the current inference path. The Advanced GUI edits StartEmotion and EndEmotion instead.
+Legacy single emotion. Not read by inference: set StartEmotion and EndEmotion instead. The constructor that takes an EEmotion copies it into
+both.
 
 ```cpp
 EEmotion Emotion = EEmotion::None;
 ```
 
 ### `StartEmotion`
-The emotion to apply to the start of this segment. TMap keys are emotions, values are their intensities (Sums to 1)
+The emotion blend at the start of this segment. Keys are emotions, values are their intensities. Weights are clamped to [0, 1], None keys are
+removed, and the rest is normalized to sum to 1. The default {None: 1} means unset: the value is interpolated from neighbouring segments, or
+DefaultEmotion is used if no segment sets one.
 
 ```cpp
 TMap<EEmotion, float> StartEmotion;
 ```
 
 ### `EndEmotion`
-The emotion to apply to the end of this segment. TMap keys are emotions, values are their intensities (Sums to 1)
+The emotion blend at the end of this segment. Keys are emotions, values are their intensities. Weights are clamped to [0, 1], None keys are
+removed, and the rest is normalized to sum to 1. The default {None: 1} means unset: the value is interpolated from neighbouring segments, or
+DefaultEmotion is used if no segment sets one.
 
 ```cpp
 TMap<EEmotion, float> EndEmotion;
 ```
 
 ### `Language`
-The language/dialect of this segment. Undefined uses the default language from the parent FLingotionModelInput.
+The language/dialect of this segment. If undefined, or not spoken by the character, the parent FLingotionModelInput's DefaultLanguage is used.
 
 ```cpp
 FLingotionLanguage Language;
@@ -51,21 +56,29 @@ bool bIsCustomPronounced = false;
 ```
 
 ### `StartSpeed`
+Speech-rate multiplier at the start of this segment (1.0 = normal). Interpolated linearly to EndSpeed within the segment. Not range-checked.
+
 ```cpp
 float StartSpeed = 1.0f;
 ```
 
 ### `EndSpeed`
+Speech-rate multiplier at the end of this segment (1.0 = normal). Not range-checked.
+
 ```cpp
 float EndSpeed = 1.0f;
 ```
 
 ### `StartLoudness`
+Loudness multiplier at the start of this segment (1.0 = normal). Interpolated linearly to EndLoudness within the segment. Not range-checked.
+
 ```cpp
 float StartLoudness = 1.0f;
 ```
 
 ### `EndLoudness`
+Loudness multiplier at the end of this segment (1.0 = normal). Not range-checked.
+
 ```cpp
 float EndLoudness = 1.0f;
 ```

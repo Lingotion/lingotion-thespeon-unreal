@@ -14,16 +14,17 @@ namespace IO
  * Static utility class for loading files at runtime.
  *
  * Provides methods to resolve paths within the plugin's RuntimeData directory
- * and to load files from disk. All hard-coded file paths used by the plugin
- * are centralized in this class.
+ * and to load files from disk. Runtime file paths are centralized in this class;
+ * the editor module builds a few paths of its own.
  */
 class LINGOTIONTHESPEON_API RuntimeFileLoader
 {
   public:
 	/**
-	 * @brief Returns the absolute path to the plugin's root directory.
+	 * @brief Returns the path to the plugin's root directory.
 	 *
-	 * @return A const reference to the cached plugin directory path string.
+	 * @return A const reference to the plugin directory path, cached on first call. Empty (and stays empty)
+	 *         if the plugin could not be found.
 	 */
 	static const FString& GetPluginDir();
 
@@ -50,7 +51,7 @@ class LINGOTIONTHESPEON_API RuntimeFileLoader
 	 * @brief Returns the content directory path for runtime model assets.
 	 *
 	 * This path works both at runtime and in the editor for loading
-	 * ONNX model assets via StaticLoadObject.
+	 * ONNX model assets via FStreamableManager.
 	 *
 	 * @return A const reference to the cached runtime model directory path string.
 	 */

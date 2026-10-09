@@ -52,7 +52,7 @@ void ULookupTableManager::RegisterLookupTable(Thespeon::Language::LanguageModule
 
 	// Double-check under write lock: another thread may have registered the same table
 	// between the read check above and this write lock. Mirrors the pattern in
-	// UModuleManager::GetModule<T>() (ModuleManager.h:62-66).
+	// UModuleManager::GetModule<T>() (ModuleManager.h).
 	// Note: Cannot call IsRegistered() here — it acquires a read lock internally,
 	// and FRWLock is not re-entrant. Doing so while holding the write lock would deadlock.
 	{
@@ -113,6 +113,11 @@ void ULookupTableManager::DisposeAndClear()
 	FWriteScopeLock WriteLock(LookupTablesLock);
 	LINGO_LOG_FUNC(EVerbosityLevel::Debug, TEXT("Clearing %d lookup tables."), AvailableLookupTables.Num());
 	AvailableLookupTables.Empty();
+}
+
+bool ULookupTableManager::IsTableRegistered(Thespeon::Language::LanguageModule* Module) const
+{
+	return Module && IsRegistered(Module->GetLookupTableID());
 }
 
 bool ULookupTableManager::IsRegistered(const FString& MD5) const

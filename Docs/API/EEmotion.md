@@ -2,6 +2,11 @@
 
 *Defined in: `LingotionThespeon/Public/Core/ModelInput.h`*
 
+Enumeration representing various emotions that can be associated with a segment.
+Also contains a None as a special null-like value.
+
+## Values
+
 ### `None`
 No emotion. Special null-like value.
 
@@ -103,6 +108,3 @@ Cheerfulness, hopeful. Joyful anticipation. Message: Things will work out.
 
 ### `Aggressiveness`
 Pushy, self-assertive. Driven by anger. Message: I must remove obstacles.
-
-Enumeration representing various emotions that can be associated with a segment.
-Also contains a None as a special null-like value.

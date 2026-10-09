@@ -10,7 +10,8 @@
 /**
  * Blueprint function library providing Lingotion Thespeon utility functions.
  *
- * Exposes JSON parsing, audio saving, and control character helpers to Blueprints.
+ * Exposes JSON parsing, input validation, audio saving, control character helpers, the warmup session ID
+ * and logging verbosity to Blueprints.
  */
 UCLASS()
 class ULingotionBlueprintLibrary : public UBlueprintFunctionLibrary
@@ -19,18 +20,19 @@ class ULingotionBlueprintLibrary : public UBlueprintFunctionLibrary
 
   public:
 	/**
-	 * @brief Parses a JSON string into a FLingotionModelInput structure.
+	 * @brief Loads a JSON file and parses it into an FLingotionModelInput structure.
 	 *
-	 * @param FilePath The path to the JSON file to parse.
-	 * @param OutModelInput Receives the parsed model input on success.
-	 * @return true if parsing succeeded.
+	 * @param FilePath The path to the JSON file to load.
+	 * @param OutModelInput Receives the parsed model input on success. May be partly filled on failure.
+	 * @return true if parsing succeeded; false if the file has no "actorName" field or a present field fails to parse.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Lingotion Thespeon|JSON")
 	static bool ParseModelInputFromJson(const FString& FilePath, FLingotionModelInput& OutModelInput);
 
 	/**
 	 * @brief Validates that the selected character module (character name + module type) has been imported into the project and modifies ModelInput
-	 * with a fallback character module if not.
+	 * with a fallback character module if not. If the character itself is not imported, an arbitrary imported character is
+	 * used instead, with a warning.
 	 *
 	 * @param ModelInput The model input instance to validate and populate with fallbacks.
 	 * @param FallbackModuleType The preferred module type to fall back to if the current one is invalid but the character exists.
@@ -45,11 +47,13 @@ class ULingotionBlueprintLibrary : public UBlueprintFunctionLibrary
 	/**
 	 * @brief Validates that an entire input instance contains valid selections for currently loaded character modules.
 	 * If any part is invalid, it will attempt to set fallbacks based on what is available.
+	 * Also cleans text, splits numbers into extra segments and fills keypoints, so the segment count can change.
+	 * ModelInput is modified even when this returns false.
 	 *
 	 * @param ModelInput The model input instance to validate and populate with fallbacks.
 	 * @param FallbackModuleType Module type to fall back to if the selected one is unavailable.
-	 * @param FallbackLanguage Language to fall back to for segments with undefined languages.
-	 * @param FallbackEmotion Emotion to fall back to for segments with None emotion.
+	 * @param FallbackLanguage Replaces the input's DefaultLanguage when it is undefined.
+	 * @param FallbackEmotion Replaces the input's DefaultEmotion when it is None.
 	 * @param OutModelInput Receives the validated and potentially modified model input.
 	 * @return true if the input is valid or was successfully corrected with fallbacks.
 	 */
@@ -63,11 +67,11 @@ class ULingotionBlueprintLibrary : public UBlueprintFunctionLibrary
 	);
 
 	/**
-	 * @brief Saves returned Lingotion Synthesized data as a .wav file at the target location.
+	 * @brief Saves synthesized audio samples as a 32-bit float, mono, 44100 Hz .wav file. An existing file is overwritten.
 	 *
-	 * @param Filename Path to save file name
-	 * @param Samples Array of samples
-	 * @return true if succeeded, false if not.
+	 * @param Filename Path of the .wav file to write.
+	 * @param Samples The audio samples to save.
+	 * @return true if the file was written; false if Samples is empty (with an error logged) or the file write fails.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Lingotion Thespeon|Audio")
 	static bool SaveAudioAsWav(const FString& Filename, const TArray<float>& Samples);
@@ -105,7 +109,8 @@ class ULingotionBlueprintLibrary : public UBlueprintFunctionLibrary
 
 	/**
 	 * @brief Sets the current logging level to the specified value.
-	 * Logs below that verbosity level will not be visible.
+	 * Messages more detailed than this level are not logged. The change is not saved to config, but it writes the settings
+	 * object directly, so in the editor it outlives PIE and shows in Project Settings for the rest of the session.
 	 *
 	 * @param VerbosityLevel The specific level to set the logging to.
 	 */
@@ -116,9 +121,9 @@ class ULingotionBlueprintLibrary : public UBlueprintFunctionLibrary
 	}
 
 	/**
-	 * @brief Gets the current logging level as specified in the settings.
+	 * @brief Returns the current verbosity level, including any change made by SetVerbosityLevel.
 	 *
-	 * @return VerbosityLevel The current verbosity level
+	 * @return The current verbosity level.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Lingotion Thespeon|Settings")
 	static EVerbosityLevel GetVerbosityLevel()

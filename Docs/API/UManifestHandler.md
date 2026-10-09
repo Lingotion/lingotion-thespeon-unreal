@@ -2,11 +2,15 @@
 
 *Defined in: `LingotionThespeon/Public/Core/ManifestHandler.h`*
 
-Manages imported character and languages via the LingotionThespeonManifest.json registry.
+Manages imported characters and languages via the LingotionThespeonManifest.json registry.
 This engine subsystem reads and parses the manifest on initialization,
 providing query methods for looking up character modules, language modules,
 available characters, and supported languages. It serves as the central
 registry for all imported models.
+Thread safety: the query methods are safe to call from any thread. Each takes a
+snapshot of the parsed manifest under a read lock and works from that, so a
+concurrent ReloadManifestFromDisk() cannot pull the data out from under an
+in-flight query. ReloadManifestFromDisk() itself is game-thread only.
 
 ## Functions
 
@@ -21,7 +25,7 @@ names (e.g., "ultralow", "mid", "ultrahigh").
 **Returns:** The matching EThespeonModuleType, or EThespeonModuleType::None if no match is found.
 
 ```cpp
-EThespeonModuleType FindModuleType(const FString& ModuleTypeString);
+EThespeonModuleType FindModuleType(const FString& ModuleTypeString) const;
 ```
 
 ### `GetAllLanguagesInCharacterModule`
@@ -30,21 +34,21 @@ Creates a list of language objects for all languages that the
 specified character module can synthesize.
 
 **Parameters:**
-- `ModuleName`: The character module name to query.
+- `ModuleName`: The character module ID to query (e.g. a value returned by GetModuleTypesOfCharacter).
 
 **Returns:** An array of FLingotionLanguage objects for all supported languages.
 
 ```cpp
-TArray<FLingotionLanguage> GetAllLanguagesInCharacterModule(const FString& ModuleName);
+TArray<FLingotionLanguage> GetAllLanguagesInCharacterModule(const FString& ModuleName) const;
 ```
 
 ### `GetAllAvailableCharacters`
-Returns the names of all available characters across all imported files.
+Returns the names of all characters across all imported character modules.
 
 **Returns:** A set of character name strings.
 
 ```cpp
-TSet<FString> GetAllAvailableCharacters();
+TSet<FString> GetAllAvailableCharacters() const;
 ```
 
 ### `GetModuleTypesOfCharacter`
@@ -56,5 +60,5 @@ Returns a mapping of module size tiers to module ID strings for a character.
 **Returns:** A map from EThespeonModuleType to the corresponding module ID string.
 
 ```cpp
-TMap<EThespeonModuleType, FString> GetModuleTypesOfCharacter(const FString& CharacterName);
+TMap<EThespeonModuleType, FString> GetModuleTypesOfCharacter(const FString& CharacterName) const;
 ```

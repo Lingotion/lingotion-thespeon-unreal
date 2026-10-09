@@ -9,6 +9,7 @@
 #include "Core/BackendType.h"
 #include "HAL/CriticalSection.h"
 #include "NNEModelData.h"
+#include "UObject/StrongObjectPtr.h"
 
 namespace metaonnx
 {
@@ -95,7 +96,7 @@ struct FModuleEntry
 	/** Unique identifier for this module. */
 	FString ModuleID;
 
-	/** Path to the JSON file that defines this module. */
+	/** File name of the JSON config that defines this module, relative to the RuntimeData directory. */
 	FString JsonPath;
 
 	/** Optional version for collision detection and compatibility checks. */
@@ -174,7 +175,7 @@ struct FModuleFile
  * Represents units of functionality for text-to-speech synthesis.
  * Derived classes (CharacterModule, LanguageModule) specialize this for
  * character voice models and language phonemizer models respectively.
- * Manages ONNX model files and loads them asynchronously via FStreamableManager.
+ * Manages ONNX model files and loads them through FStreamableManager, blocking the calling worker thread until they arrive.
  */
 class Module
 {
@@ -184,7 +185,7 @@ class Module
 	/** Unique identifier for this module. */
 	FString ModuleID;
 
-	/** Path to the JSON definition file for this module. */
+	/** File name of the JSON config for this module, relative to the RuntimeData directory. */
 	FString JSONPath;
 
 	/** Semantic version of this module. */
@@ -206,7 +207,8 @@ class Module
 	 * @brief Loads ONNX models for this module, keyed by the workload ID each will be pooled under.
 	 *
 	 * Skips workload IDs already present in AlreadyRegisteredWorkloadIDs so shared files are not
-	 * loaded twice.
+	 * loaded twice, and skips lookup-table and metagraph entries. Must not be called on the game thread;
+	 * blocks for up to 10 seconds.
 	 *
 	 * @param AlreadyRegisteredWorkloadIDs Workload IDs that already have a pool.
 	 * @param RequestedBackend The NNE backend the caller asked for.
@@ -215,7 +217,8 @@ class Module
 	 * @param Priority Forwarded to FStreamableManager::RequestAsyncLoad. Use 0 for default, 100 for high
 	 *                 (FStreamableManager::AsyncLoadHighPriority). Used so that a synth-triggered load can
 	 *                 jump ahead of in-flight preload loads in the streamable manager's queue.
-	 * @return True if all models were loaded successfully, false otherwise.
+	 * @return False on timeout, a game-thread call or an unresolvable workload ID. Models that fail to resolve or
+	 *         load are logged and left out of OutLoadedModels without making the call fail.
 	 */
 	bool LoadModels(
 	    const TSet<FString>& AlreadyRegisteredWorkloadIDs,
@@ -226,21 +229,22 @@ class Module
 	) const;
 
 	/**
-	 * @brief Resolves an internal file name to its model ID (content path).
+	 * @brief Resolves an internal file name to the model's base file name (its MD5).
 	 *
 	 * @param InternalName The internal file identifier to look up.
-	 * @return The resolved model ID string, or empty if not found.
+	 * @return The model's base file name, or empty (with an error logged) if not found.
 	 */
 	FString GetInternalModelID(const FString& InternalName) const;
 
 	/**
 	 * @brief Returns this module's parsed metagraph, reading and caching it on first call.
-	 * Immutable once parsed, so a single* instance is shared by every caller.
+	 * Immutable once parsed, so one instance is shared by every caller.
 	 *
 	 * Safe to call from any thread.
 	 *
 	 * @return The parsed graph, or nullptr if this module declares no metagraph file or the
-	 *         file could not be read.
+	 *         file could not be read, has a bad size or fails to parse. Failures are not cached,
+	 *         so every call retries and logs again.
 	 */
 	TSharedPtr<const metaonnx::MetaGraph, ESPMode::ThreadSafe> GetMetaGraph() const;
 
@@ -250,6 +254,7 @@ class Module
 	 * @param NodeID The metagraph node id, which is also its InternalFileMappings key.
 	 * @param RequestedBackend The backend the caller asked for.
 	 * @param bForceRequestedBackend Ignore any declared device and return RequestedBackend.
+	 * A GPU device pin is only honoured on Windows; elsewhere, and for unsupported devices, RequestedBackend is used.
 	 * @return The effective backend, or EBackendType::None if the metagraph could not be read.
 	 */
 	EBackendType ResolveNodeBackend(const FString& NodeID, EBackendType RequestedBackend, bool bForceRequestedBackend) const;
@@ -274,7 +279,8 @@ class Module
 	 * @param RequestedBackend The backend the caller asked for.
 	 * @param bForceRequestedBackend Ignore metagraph device pins and use RequestedBackend throughout.
 	 * @param OutWorkloads Receives workload ID -> effective backend for every model in this module.
-	 * @return False if the metagraph could not be read, in which case the caller must not register.
+	 * @return False if the metagraph could not be read or a node's workload ID could not be resolved (e.g. RequestedBackend
+	 *         None), in which case the caller must not register. OutWorkloads is not cleared and may be partly filled.
 	 */
 	bool GetRequiredWorkloads(EBackendType RequestedBackend, bool bForceRequestedBackend, TMap<FString, EBackendType>& OutWorkloads) const;
 
@@ -287,6 +293,13 @@ class Module
 
 	/**
 	 * @brief Returns the type identifier string for this module (e.g., "character" or "language").
+	 *
+	 * This is the project's hand-rolled type discriminator: Module is not a UObject, so Cast<T> does
+	 * not apply, and RTTI is off (the Unreal default), so dynamic_cast is unavailable.
+	 *
+	 * Every derived class must also expose a matching `static FString StaticModuleType()` returning
+	 * the same string, so the type can be named without an instance. UModuleManager::GetModule<T>
+	 * compares the two before downcasting a stored module.
 	 *
 	 * @return The module type string.
 	 */
@@ -313,13 +326,24 @@ class Module
 	 */
 	virtual bool InitializeFromJSON(const FString& JsonString) = 0;
 
+	/**
+	 * @brief Reads one of the module's data files (not an ONNX model) into memory.
+	 *
+	 * @param File The file, from InternalFileMappings.
+	 * @param OutBytes Receives the file's contents.
+	 * @return False if the file could not be read; the reason is logged.
+	 */
+	bool ReadModuleFile(const FModuleFile& File, TArray<uint8>& OutBytes) const;
+
   private:
 	/**
-	 * @brief Asynchronously loads model data from the given soft object paths.
+	 * @brief Requests the given assets through FStreamableManager on the game thread and blocks the calling
+	 * thread until they arrive (up to 10 seconds).
 	 *
 	 * @param SoftPaths Array of asset paths to load.
 	 * @param OutLoadedModels Array to populate with the loaded model data.
-	 * @return True if all models were loaded successfully, false otherwise.
+	 * @param Priority Forwarded to FStreamableManager::RequestAsyncLoad.
+	 * @return False on timeout or a game-thread call. Assets that fail to load are logged and left out.
 	 */
 	static bool
 	LoadModelsAsync(const TArray<FSoftObjectPath>& SoftPaths, TArray<TStrongObjectPtr<UNNEModelData>>& OutLoadedModels, int32 Priority = 0);
@@ -330,15 +354,14 @@ class Module
 };
 
 /**
- * @brief Attempts to resolve a module's file mapping to a UE content path for runtime use.
+ * @brief Builds the workload pool ID for a model file on a backend.
  *
- * Constructs the expected workload ID from the module ID and backend type,
- * then checks if it exists in the content directory.
+ * Only formats the ID; it does not check that the model exists.
  *
- * @param ModuleID The module identifier to resolve.
- * @param BackendType The backend type to resolve for.
- * @param OutWorkloadID Output parameter that receives the resolved content path.
- * @return True if the workload ID was resolved successfully, false otherwise.
+ * @param ModuleID The model's base file name (its MD5), despite the parameter name.
+ * @param BackendType The backend type to build the ID for.
+ * @param OutWorkloadID Receives "<Backend>_<ModuleID>".
+ * @return False only if BackendType is None.
  */
 bool TryGetRuntimeWorkloadID(const FString& ModuleID, EBackendType BackendType, FString& OutWorkloadID);
 } // namespace Core

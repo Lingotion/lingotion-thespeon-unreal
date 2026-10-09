@@ -3,23 +3,20 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Internationalization/Regex.h"
 #include "Core/ModelInput.h"
 #include "Core/Language.h"
-#include "Language/TextPosition.h"
 
-// Forward declarations
-class UThespeonInput;
+namespace Thespeon::Language
+{
+class FTextPreprocessingRules;
+} // namespace Thespeon::Language
 
 /**
- * Internal static utility class for preprocessing text in the Thespeon AI text pipeline.
+ * Internal static utility class that preprocesses the segments of an input before phonemization.
  *
- * Provides text cleaning functionality including:
- * - Apostrophe normalization (26 Unicode variants → standard ')
- * - Pattern removal (<<<\d+>>>)
- * - Whitespace normalization
- * - Lowercase conversion
- * - Number to word/phoneme conversion (language-specific)
+ * What depends on the language - normalization, how numbers are spoken, what a word is - comes from the
+ * segment's language pack (FTextPreprocessingRules). What does not stays here: splitting segments around
+ * numbers, audio sample request markers, and speed/loudness/emotion keypoints.
  */
 class LINGOTIONTHESPEON_API FTextPreprocessor
 {
@@ -30,71 +27,59 @@ class LINGOTIONTHESPEON_API FTextPreprocessor
 	FTextPreprocessor& operator=(const FTextPreprocessor&) = delete;
 
 	/**
-	 * Cleans the input text by normalizing apostrophes, converting to lowercase,
-	 * removing unwanted patterns, and normalizing whitespace.
-	 * @param Input The text to clean
-	 * @param Position The position of the text segment (First, Middle, Last, Only) for context-aware cleaning
-	 * @return The cleaned text
+	 * Returns the text preprocessing rules for a segment's language, or nullptr (having logged why) if there are
+	 * none, which fails preprocessing.
 	 */
-	static FString CleanText(const FString& Input, ETextPosition Position);
+	using FRulesForLanguage = TFunctionRef<const Thespeon::Language::FTextPreprocessingRules*(const FLingotionLanguage&)>;
 
 	/**
-	 * Splits a segment into multiple segments when numbers are found.
-	 * Numbers are converted to phonemes and placed in separate segments marked as CustomPronounced.
-	 * This prevents the phonemizer from double-processing the already-phonemized numbers.
+	 * Preprocesses the segments in place, then populates their emotion, speed and loudness keypoints.
 	 *
-	 * Example: "I have 44 apples" with emotion Interest becomes:
-	 *   - Segment 1: "i have " (bIsCustomPronounced: false, emotion: Interest)
-	 *   - Segment 2: "fˈɔːɹɾi fˈoːɹ" (bIsCustomPronounced: true, emotion: Interest)
-	 *   - Segment 3: " apples" (bIsCustomPronounced: false, emotion: Interest)
+	 * Each natural language segment is run through its language's rules, and each number in it is spoken out in
+	 * phonemes as a segment of its own, marked as custom pronounced so that it is not phonemized again:
 	 *
-	 * @param Segment The input segment to process (should already be cleaned and have language set)
-	 * @return Array of segments with numbers converted and marked as CustomPronounced
+	 *   "I have 44 apples" becomes "i have " (natural), "fˈɔːɹɾi fˈoːɹ" (custom pronounced), " apples" (natural).
+	 *
+	 * Custom pronunciation (IPA) segments are left alone except that runs of audio sample request markers are
+	 * collapsed - several characters the rules rewrite are IPA symbols, such as U+02C8 (primary stress).
+	 * A segment left with no text is dropped, as the voice models' training does.
+	 *
+	 * @param Segments The segments to preprocess, with their languages resolved.
+	 * @param RulesForLanguage Returns the rules for a segment's language. Only asked for natural language segments.
+	 * @param DefaultEmotion The emotion for the keypoints when no segment gives one.
+	 * @return False if a segment's language has no rules, a number cannot be spoken, no text is left, or the
+	 *         keypoints cannot be populated. The reason is logged.
 	 */
-	[[nodiscard]] static TArray<FLingotionInputSegment> SplitSegmentByNumbers(const FLingotionInputSegment& Segment);
+	[[nodiscard]] static bool
+	PreprocessSegments(TArray<FLingotionInputSegment>& Segments, FRulesForLanguage RulesForLanguage, EEmotion DefaultEmotion);
 
-	/**
-	 * Extracts words from text using UE5 native methods that match the word regex pattern.
-	 * Matches words including contractions (e.g., "don't", "it's").
-	 * Pattern: [\p{L}\p{M}\p{N}]+(?:[''][\p{L}\p{M}\p{N}]+)*
-	 * @param Text The text to extract words from
-	 * @return Array of extracted words
-	 */
-	static TArray<FString> ExtractWords(const FString& Text);
+	/** Collapses every run of audio sample request markers into one. Not a language rule, so it needs none. */
+	static FString CollapseAudioSampleRequests(const FString& Text);
 
   private:
-	// Set of ambiguous apostrophe characters that should be normalized to standard apostrophe
-	static const TSet<TCHAR> AmbiguousApostrophes;
+	/** A part of a partitioned segment: text or a number, and for a merged number its markers' positions. */
+	struct FSegmentPart
+	{
+		FString Text;
+		bool bIsNumber = false;
+		// Where the markers that were inside a merged number were, as fractions of its length.
+		TArray<float> MarkerFractions;
+	};
 
-	// Standard apostrophe character (U+0027) used for normalization
-	static constexpr TCHAR StandardApostrophe = TEXT('\'');
+	static bool PreprocessSegment(
+	    const FLingotionInputSegment& Segment, const Thespeon::Language::FTextPreprocessingRules& Rules, TArray<FLingotionInputSegment>& OutSegments
+	);
 
-	/**
-	 * Helper function to check if a character is part of a word.
-	 * Includes just letters
-	 */
-	static bool IsWordCharacter(TCHAR Char);
+	/** Merges numbers separated by nothing but markers into one number, remembering where the markers were. */
+	static TArray<FSegmentPart> MergeMarkerSeparatedNumbers(const TArray<FSegmentPart>& Parts);
 
-	/**
-	 * Helper function to check if a character is an apostrophe (standard or ambiguous)
-	 */
-	static bool IsApostrophe(TCHAR Char);
-
-	/**
-	 * Gets the appropriate regex pattern for detecting numbers in the given language.
-	 * Different languages may have different number formats.
-	 *
-	 * @param Iso639_2 The ISO 639-2 language code
-	 * @return The regex pattern for matching numbers (including ordinal suffixes where applicable)
-	 */
-	static const FRegexPattern& GetNumberPattern(const FString& Iso639_2);
+	/** A sub-segment of Original with empty emotion blends, so that splitting adds no interior emotion keypoints. */
+	static FLingotionInputSegment MakeSplitSegment(const FLingotionInputSegment& Original, const FString& Text, bool bIsCustomPronounced);
 
 	/**
-	 * Trims the text based on its position in the input stream.
-	 *
-	 * @param Text The text to trim
-	 * @param Position The position of the text segment
-	 * @return The trimmed text
+	 * Restores the original segment's keypoints onto the sub-segments splitting produced. Emotion keeps only the
+	 * outer endpoints (interior blends stay empty so the curve passes straight through), while speed and loudness,
+	 * which have no unset representation, are resampled from the original linear ramp at each new boundary.
 	 */
-	static FString TrimBasedOnPosition(const FString& Text, ETextPosition Position);
+	static void ApplySplitKeypoints(const FLingotionInputSegment& Original, TArray<FLingotionInputSegment>& SplitSegments);
 };
